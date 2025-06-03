@@ -1,0 +1,25 @@
+# Temporary files
+*~
+
+# Python:
+*.pyc
+*.egg-info
+dist/
+build/
+
+# Folders
+tmp
+.Xil
+.vscode
+node_modules/
+
+# Vivado
+*.jou
+*.log
+vivado_*.str
+
+\.vscode/
+.cache/
+*.img
+
+venv/

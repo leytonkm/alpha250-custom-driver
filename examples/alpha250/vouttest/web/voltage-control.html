@@ -1,0 +1,36 @@
+<template class="template">
+  <!-- Voltage Control -->
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <h4>Voltage Control</h4>
+    </div>
+    <div class="panel-body">
+      
+      <div class="form-group">
+        <label class="control-label">Output Control:</label>
+        <div class="form-inline">
+          <div class="checkbox">
+            <label>
+              <input type="checkbox" id="output-toggle"> Enable 0.5V Output
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="control-label">Current Output:</label>
+        <div class="form-inline">
+          <span id="voltage-display" class="form-control-static">0.000</span> V
+          <span id="status-display" class="label label-default">Disabled</span>
+        </div>
+      </div>
+
+      <div class="help-block">
+        <small>Enabling the output will set the voltage to 0.5V on the precision DAC channel (DAC0) <br>
+            Version 1.0
+        </small>
+      </div>
+
+    </div>
+  </div>
+</template> 

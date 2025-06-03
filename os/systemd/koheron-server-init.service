@@ -1,0 +1,11 @@
+[Unit]
+Description=Display last digit of IP address on leds
+Requires=koheron-server.service 
+Wants=network-online.target
+After=koheron-server.service network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/koheron-server/koheron-server-init.py
+
+[Install]
+WantedBy=multi-user.target

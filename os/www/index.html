@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title></title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="author" content="Koheron">
+    <meta charset="utf-8">
+
+    <!--http://stackoverflow.com/questions/49547/making-sure-a-web-page-is-not-cached-across-all-browsers-->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+
+    <link rel="shortcut icon" href="/koheron/kbird.ico">
+    <link rel="stylesheet" type="text/css" href="/koheron/bootstrap.min.css">
+    <link rel="stylesheet" type="text/css" href="/koheron/koheron.css">
+    <link rel="stylesheet" type="text/css" href="main.css">
+
+    <script type="text/javascript" src="html-imports.min.js"></script>
+    <link rel="import" href="/koheron/navigation.html" data-parent="navigation">
+
+    <script type="text/javascript" src="/koheron/jquery.min.js"></script>
+    <script type="text/javascript" src="/koheron/bootstrap.min.js"></script>
+  </head>
+
+  <body>
+
+  <div id="navigation"></div>
+
+  <div id="main" class="container-fluid" style="padding: 20px;">
+
+    <h1 style="font-size: 120%; padding-bottom: 20px; margin-top: 40px;">Image</h1>
+
+    <p>Version: <span id="image-version"></span></p>
+
+    <br><br>
+
+    <h1 style="font-size: 120%; padding-bottom: 20px;">Instruments</h1>
+
+    <table id="instruments-table" class="table">
+    </table>
+
+    <input type="button" id="upload-btn" class="btn btn-primary" value="Add instrument" onclick="document.getElementById('upload-input').click();" style="width: auto; border: 0; display: inline-block; height: auto;">
+    <input type="file" id="upload-input" name="file" onchange="instruments_widget.uploadInstrumentClick(); return false;" style="display: none;">
+    <span style="color: red; margin: 0px 10px;" id="upload-status"></span>
+
+  </div>
+
+  <script src="/koheron/instruments.js"></script>
+
+  <script language="javascript" type="text/javascript">
+    window.addEventListener('HTMLImportsLoaded', function() {
+      imports = new Imports(document);
+      driver = new Instruments();
+      instruments_widget = new InstrumentsWidget(document, driver);
+    }, false);
+  </script>
+
+  </body>
+
+</html>
