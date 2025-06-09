@@ -1,0 +1,158 @@
+---
+name: current-ramp-analyzer
+board: boards/alpha250
+version: 0.1.0
+
+cores:
+  # Basic register control
+  - fpga/cores/axi_ctl_register_v1_0
+  - fpga/cores/axi_sts_register_v1_0
+  
+  # Hardware timing and control
+  - fpga/cores/pulse_generator_v1_0
+  - fpga/cores/edge_detector_v1_0
+  
+  # Alpha250-specific cores
+  - boards/alpha250/cores/precision_dac_v1_0
+  - boards/alpha250/cores/spi_cfg_v1_0
+
+memory:
+  # Control registers
+  - name: control
+    offset: '0x60000000'
+    range: 4K
+    
+  # Status registers  
+  - name: status
+    offset: '0x50000000'
+    range: 4K
+    
+  # PS control (for advanced features)
+  - name: ps_control
+    offset: '0x64000000'
+    range: 4K
+    
+  # PS status
+  - name: ps_status
+    offset: '0x54000000'
+    range: 4K
+    
+  # XADC for internal monitoring
+  - name: xadc
+    offset: '0x43C00000'
+    range: 64K
+    
+  # Photodiode data buffer (1000 samples × 4 bytes × 2 channels safety margin)
+  - name: photodiode_data
+    offset: '0x40000000'
+    range: 16K
+    
+  # Ramp waveform buffer (software-generated ramp data)
+  - name: ramp_waveform
+    offset: '0x40004000'
+    range: 16K
+
+control_registers:
+  # Ramp generation parameters
+  - ramp_frequency        # 10Hz base frequency (adjustable)
+  - ramp_amplitude        # Peak-to-peak amplitude in DAC codes
+  - ramp_offset          # DC offset for ramp
+  - ramp_enable          # Start/stop ramp generation
+  
+  # DC output control
+  - dc_voltage           # Independent DC output level
+  - dc_enable            # Enable/disable DC output
+  
+  # Acquisition control  
+  - samples_per_cycle    # 1000 samples per 10Hz cycle
+  - acquisition_mode     # Continuous/single/triggered
+  - trigger_source       # Manual/automatic/external
+  
+  # Timing control
+  - cycle_period         # Period register for 10Hz timing
+  - sample_rate_div      # ADC sampling rate divider
+  
+  # System control
+  - system_reset         # Global reset
+  - calibration_mode     # Enable calibration routines
+  
+  # Precision DAC control (for DC output)
+  - precision_dac_ctl
+  - precision_dac_data[2]
+
+status_registers:
+  # Real-time data
+  - photodiode_adc       # Current photodiode reading
+  - ramp_voltage_out     # Current ramp output voltage
+  - dc_voltage_out       # Current DC output voltage
+  
+  # Timing and synchronization
+  - sample_index         # Current sample (0-999 in cycle)
+  - cycle_count          # Number of completed cycles
+  - acquisition_status   # Running/stopped/error states
+  
+  # System monitoring
+  - adc[n_adc]          # Raw ADC values for debugging
+  - system_status       # Error flags, overflows, etc.
+  - timing_status       # Clock stability, sync status
+
+ps_control_registers:
+  # SPI configuration for precision DAC
+  - spi_cfg_data
+  - spi_cfg_cmd
+
+ps_status_registers:
+  # SPI status
+  - spi_cfg_sts
+  
+  # Advanced timing info
+  - precise_timestamp    # High-resolution timing
+  - buffer_status       # Memory buffer fill levels
+
+parameters:
+  # Clock configuration
+  fclk0: 200000000      # FPGA fabric clock (200 MHz)
+  adc_clk: 250000000    # ADC sampling clock (250 MHz) 
+  dac_clk: 250000000    # DAC update clock (250 MHz)
+  
+  # System parameters
+  n_adc: 2              # Number of ADC channels
+  samples_per_cycle: 1000    # Default samples per 10Hz cycle
+  base_frequency: 10    # Base ramp frequency (Hz)
+  
+  # Data buffer sizes
+  ramp_buffer_size: 4096     # Ramp waveform buffer size
+  data_buffer_size: 4096     # Photodiode data buffer size
+  
+  # Voltage ranges (for web interface)
+  max_ramp_voltage: 5.0      # Maximum ramp amplitude (V)
+  max_dc_voltage: 10.0       # Maximum DC output (V)
+  adc_voltage_range: 2.0     # ADC input range (±V)
+
+xdc:
+  - boards/alpha250/config/ports.xdc
+
+drivers:
+  # Alpha250 board drivers
+  - boards/alpha250/drivers/common.hpp
+  - boards/alpha250/drivers/eeprom.hpp
+  - boards/alpha250/drivers/gpio-expander.hpp
+  - boards/alpha250/drivers/temperature-sensor.hpp
+  - boards/alpha250/drivers/power-monitor.hpp
+  - boards/alpha250/drivers/clock-generator.hpp
+  - boards/alpha250/drivers/ltc2157.hpp        # ADC driver
+  - boards/alpha250/drivers/ad9747.hpp         # DAC driver
+  - boards/alpha250/drivers/precision-adc.hpp
+  - boards/alpha250/drivers/precision-dac.hpp  # For DC output
+  - boards/alpha250/drivers/spi-config.hpp
+  
+  # Your custom driver
+  - ./current_ramp.hpp
+
+web:
+  # Web interface files
+  - web/index.html
+  - web/main.css
+  - web/koheron.ts
+  - web/current_ramp.ts
+  - web/plot.js 

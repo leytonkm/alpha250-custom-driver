@@ -1,27 +1,32 @@
 ---
-name: vouttest
+name: currentramp
 board: boards/alpha250
 version: 0.2.1
 
 cores:
+  # Basic register control
   - fpga/cores/axi_ctl_register_v1_0
   - fpga/cores/axi_sts_register_v1_0
   - fpga/cores/edge_detector_v1_0
   - fpga/cores/comparator_v1_0
   - fpga/cores/unrandomizer_v1_0
+  # Precision DAC core for Alpha250
   - boards/alpha250/cores/precision_dac_v1_0
   - boards/alpha250/cores/spi_cfg_v1_0
   - ./address_counter_v1_0
 
 memory:
+  # Control registers
   - name: control
     offset: '0x60000000'
     range: 4K
-  - name: ps_control
-    offset: '0x64000000'
-    range: 4K
+  
+  # Status registers  
   - name: status
     offset: '0x50000000'
+    range: 4K
+  - name: ps_control
+    offset: '0x64000000'
     range: 4K
   - name: ps_status
     offset: '0x54000000'
@@ -37,13 +42,17 @@ memory:
     offset: '0x40040000'
 
 control_registers:
+  # MMCM control
   - mmcm
+  # Precision DAC control registers
   - precision_dac_ctl
   - precision_dac_data[2]
   - trig
 
 status_registers:
-  - adc[n_adc]
+  # Real-time data
+  - adc[n_adc]          # Raw ADC values for debugging
+  - system_status       # Error flags, overflows, etc.
 
 ps_control_registers:
   - spi_cfg_data
@@ -53,14 +62,30 @@ ps_status_registers:
   - spi_cfg_sts
 
 parameters:
-  fclk0: 200000000 # FPGA clock speed in Hz
-  adc_clk: 250000000
-  n_adc: 2
+  # Clock configuration
+  fclk0: 200000000      # FPGA fabric clock (200 MHz)
+  adc_clk: 250000000    # ADC sampling clock (250 MHz) 
+  dac_clk: 250000000    # DAC update clock (250 MHz)
+  
+  # System parameters
+  dac_width: 16         # DAC width (16 bits)
+  adc_width: 16         # ADC width (16 bits)
+  n_adc: 2              # Number of ADC channels
+  samples_per_cycle: 1000    # Default samples per 10Hz cycle
+  base_frequency: 10    # Base ramp frequency (Hz)
+  
+  # Voltage ranges (for web interface)
+  max_ramp_voltage: 2.5      # Maximum ramp amplitude (V)
+  max_dc_voltage: 2.5       # Maximum DC output (V)
+  adc_voltage_range: 1.8     # ADC input range (±V)
+  ramp_offset : 1.5
+  ramp_amplitude : 1.0
 
 xdc:
   - boards/alpha250/config/ports.xdc
 
 drivers:
+  # Required Alpha250 drivers (must be in correct order)
   - boards/alpha250/drivers/common.hpp
   - boards/alpha250/drivers/eeprom.hpp
   - boards/alpha250/drivers/gpio-expander.hpp
@@ -72,7 +97,8 @@ drivers:
   - boards/alpha250/drivers/precision-adc.hpp
   - boards/alpha250/drivers/precision-dac.hpp
   - boards/alpha250/drivers/spi-config.hpp
-  - ./voltage_control.hpp
+  # Application drivers
+  - ./currentramp.hpp
 
 web:
   - web/koheron.ts

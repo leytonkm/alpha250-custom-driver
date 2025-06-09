@@ -1,1 +1,1 @@
-source $board_path/starting_point.tcl
+source $board_path/starting_point.tcl 

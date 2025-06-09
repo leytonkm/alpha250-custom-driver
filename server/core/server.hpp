@@ -17,6 +17,14 @@
 #include <ctime>
 #include <utility>
 
+extern "C" {
+  #include <sys/socket.h>   // socket definitions
+  #include <arpa/inet.h>    // inet (3) functions
+  #include <netinet/tcp.h>
+  #include <sys/types.h>    // socket types
+  #include <sys/un.h>
+}
+
 #include "drivers_manager.hpp"
 #include "syslog.hpp"
 #include "signal_handler.hpp"
