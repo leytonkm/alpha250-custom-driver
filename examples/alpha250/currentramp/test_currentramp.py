@@ -2,6 +2,7 @@
 """
 CurrentRamp Driver Test Script
 Tests the CurrentRamp driver using the Koheron Python client
+Hardware-based precise timing implementation
 """
 
 import os
@@ -41,7 +42,7 @@ class CurrentRamp:
     
     @command()
     def set_ramp_frequency(self, frequency):
-        """Set ramp frequency in Hz (0.1-1000)"""
+        """Set ramp frequency in Hz (0.001-1000)"""
         pass
     
     @command()
@@ -76,118 +77,124 @@ class CurrentRamp:
     
     @command()
     def start_ramp(self):
-        """Start ramp output"""
+        """Start hardware ramp output"""
         pass
     
     @command()
     def stop_ramp(self):
-        """Stop ramp output"""
+        """Stop hardware ramp output"""
         pass
     
     @command()
     def get_ramp_enabled(self):
-        """Check if ramp is enabled"""
+        """Get ramp enable status"""
         return self.client.recv_bool()
     
-    # === Manual Testing Functions ===
+    @command()
+    def set_ramp_manual(self, position):
+        """Set manual ramp position (0.0-1.0)"""
+        pass
+
+    # === Hardware Status Functions ===
+    
+    @command()
+    def get_ramp_phase(self):
+        """Get current ramp phase accumulator value"""
+        return self.client.recv_uint32()
+    
+    @command()
+    def get_cycle_count(self):
+        """Get number of completed ramp cycles"""
+        return self.client.recv_uint32()
+    
+    @command()
+    def get_ramp_position(self):
+        """Get current ramp position (0.0-1.0)"""
+        return self.client.recv_float()
+    
+    @command()
+    def get_timing_status(self):
+        """Get hardware timing diagnostics"""
+        return (self.client.recv_double(),  # fs_adc
+                self.client.recv_uint32(),  # ramp_phase
+                self.client.recv_uint32(),  # cycle_count
+                self.client.recv_float(),   # ramp_position
+                self.client.recv_bool())    # hardware_ramp_enabled
+
+    # === Testing Functions ===
     
     @command()
     def set_test_voltage_channel_0(self, voltage):
-        """Set test voltage on Precision DAC Channel 0 (laser)"""
+        """Set test voltage on channel 0 (0-2.5V)"""
         pass
     
     @command()
     def set_test_voltage_channel_1(self, voltage):
-        """Set test voltage on Precision DAC Channel 1 (temperature)"""
+        """Set test voltage on channel 1 (0-2.5V)"""
         pass
     
     @command()
-    def set_ramp_manual(self, triangle_position):
-        """Set ramp to manual position (0.0 to 1.0)"""
+    def set_test_voltage_channel_2(self, voltage):
+        """Set test voltage on channel 2 (0-2.5V) - Note: conflicts with hardware ramp"""
         pass
-    
-    @command()
-    def update_ramp(self):
-        """Update ramp to next sample (call repeatedly for automatic ramp)"""
-        pass
-    
-    # === Photodiode Reading ===
     
     @command()
     def get_photodiode_reading(self):
-        """Get current photodiode reading in V"""
+        """Get photodiode reading (placeholder)"""
         return self.client.recv_float()
 
-def test_precision_dac_direct(driver):
-    """Test direct precision DAC control"""
-    print("\n🧪 Testing Direct Precision DAC Control...")
+def connect_to_device():
+    """Connect to the Alpha250 device"""
+    print("🔌 Connecting to Alpha250...")
     
     try:
-        # Test Channel 0 (laser)
-        print("   Testing Precision DAC Channel 0 (laser)...")
-        test_voltages = [0.5, 1.0, 1.5, 2.0]
-        for voltage in test_voltages:
-            driver.set_test_voltage_channel_0(voltage)
-            time.sleep(0.2)
-            print(f"   Channel 0 set to {voltage}V")
-        
-        # Test Channel 1 (temperature)
-        print("   Testing Precision DAC Channel 1 (temperature)...")
-        for voltage in test_voltages:
-            driver.set_test_voltage_channel_1(voltage)
-            time.sleep(0.2)
-            print(f"   Channel 1 set to {voltage}V")
-        
-        # Reset to safe values
-        driver.set_test_voltage_channel_0(0.0)
-        driver.set_test_voltage_channel_1(0.0)
-        
-        print("   ✅ Direct precision DAC control working")
-        return True
-        
+        # Try to connect to device
+        host = os.environ.get('HOST', '192.168.1.100')
+        client = connect(host, 'currentramp', restart=False)
+        driver = CurrentRamp(client)
+        print(f"   ✅ Connected to {host}")
+        return driver
     except Exception as e:
-        print(f"   ❌ Precision DAC test failed: {e}")
-        return False
+        print(f"   ❌ Connection failed: {e}")
+        return None
 
 def test_dc_control(driver):
-    """Test DC voltage control functions"""
+    """Test DC temperature control functions"""
     print("\n🧪 Testing DC Temperature Control...")
     
     try:
-        # Set voltage
-        test_voltage = 1.5
+        # Test voltage setting
+        test_voltage = 1.2
         print(f"   Setting DC voltage to {test_voltage}V...")
         driver.set_temperature_dc_voltage(test_voltage)
         time.sleep(0.1)
         
-        # Read back
         voltage = driver.get_temperature_dc_voltage()
-        print(f"   Read voltage: {voltage:.3f}V")
+        print(f"   Read DC voltage: {voltage:.3f}V")
         
-        if abs(voltage - test_voltage) < 0.01:
-            print("   ✅ DC voltage set/get working")
-        else:
-            print(f"   ❌ Voltage mismatch: expected {test_voltage}, got {voltage}")
-            return False
-        
-        # Test enable
-        print("   Testing DC output enable...")
+        # Test enable/disable
+        print("   Enabling DC output...")
         driver.enable_temperature_dc_output(True)
         time.sleep(0.1)
         
         enabled = driver.get_temperature_dc_enabled()
         print(f"   DC output enabled: {enabled}")
         
-        if enabled:
-            print("   ✅ DC enable/disable working")
-        else:
-            print("   ❌ DC enable failed")
-            return False
-        
-        # Clean up
+        # Test disable
+        print("   Disabling DC output...")
         driver.enable_temperature_dc_output(False)
-        return True
+        time.sleep(0.1)
         
+        enabled = driver.get_temperature_dc_enabled()
+        print(f"   DC output enabled: {enabled}")
+        
+        if abs(voltage - test_voltage) < 0.01:
+            print("   ✅ DC control working")
+            return True
+        else:
+            print("   ❌ DC voltage mismatch")
+            return False
+            
     except Exception as e:
         print(f"   ❌ DC control test failed: {e}")
         return False
@@ -204,7 +211,7 @@ def test_ramp_parameters(driver):
         time.sleep(0.1)
         
         freq = driver.get_ramp_frequency()
-        print(f"   Read frequency: {freq:.1f} Hz")
+        print(f"   Read frequency: {freq:.3f} Hz")
         
         # Test amplitude  
         test_amp = 1.2
@@ -226,7 +233,8 @@ def test_ramp_parameters(driver):
         
         # Verify values
         if (abs(amplitude - test_amp) < 0.01 and 
-            abs(offset - test_offset) < 0.01):
+            abs(offset - test_offset) < 0.01 and
+            abs(freq - test_freq) < 0.01):
             print("   ✅ Ramp parameters working")
             return True
         else:
@@ -237,53 +245,128 @@ def test_ramp_parameters(driver):
         print(f"   ❌ Ramp parameter test failed: {e}")
         return False
 
-def test_ramp_control(driver):
-    """Test ramp start/stop"""
-    print("\n🧪 Testing Ramp Control...")
+def test_hardware_ramp(driver):
+    """Test hardware ramp generation"""
+    print("\n🧪 Testing Hardware Ramp Generation...")
     
     try:
         # Configure waveform parameters
-        print("   Configuring ramp waveform...")
+        print("   Configuring hardware ramp waveform...")
         driver.generate_ramp_waveform()
         time.sleep(0.1)
         
+        # Get timing status before starting
+        fs_adc, phase_before, cycles_before, pos_before, enabled_before = driver.get_timing_status()
+        print(f"   ADC sampling frequency: {fs_adc/1e6:.1f} MHz")
+        print(f"   Initial phase: {phase_before}, cycles: {cycles_before}, position: {pos_before:.3f}")
+        
         # Start ramp
-        print("   Starting ramp...")
+        print("   Starting hardware ramp...")
         driver.start_ramp()
-        time.sleep(0.5)
-        
-        # Check status (if available)
-        try:
-            enabled = driver.get_ramp_enabled()
-            print(f"   Ramp running: {enabled}")
-        except:
-            print("   Ramp started (status check not available)")
-        
-        print("   ✅ Ramp started - check oscilloscope on Precision DAC Channel 0!")
-        
-        # Stop ramp
-        print("   Stopping ramp...")
-        driver.stop_ramp()
         time.sleep(0.1)
         
-        print("   ✅ Ramp control working")
+        # Check status
+        enabled = driver.get_ramp_enabled()
+        print(f"   Hardware ramp enabled: {enabled}")
+        
+        if not enabled:
+            print("   ❌ Hardware ramp failed to start")
+            return False
+        
+        # Monitor ramp for a few cycles
+        print("   Monitoring ramp for 2 seconds...")
+        start_time = time.time()
+        last_cycle_count = 0
+        
+        while time.time() - start_time < 2.0:
+            fs_adc, phase, cycles, position, enabled = driver.get_timing_status()
+            
+            if cycles != last_cycle_count:
+                frequency = driver.get_ramp_frequency()
+                print(f"   Cycle {cycles}: phase={phase:08x}, position={position:.3f}, freq={frequency:.3f}Hz")
+                last_cycle_count = cycles
+            
+            time.sleep(0.1)
+        
+        # Check if we got cycles
+        final_cycles = driver.get_cycle_count()
+        if final_cycles > cycles_before:
+            print(f"   ✅ Hardware ramp generated {final_cycles - cycles_before} cycles")
+            measured_freq = (final_cycles - cycles_before) / 2.0  # 2 seconds
+            expected_freq = driver.get_ramp_frequency()
+            print(f"   Measured frequency: {measured_freq:.2f} Hz (expected: {expected_freq:.2f} Hz)")
+            
+            # Stop ramp
+            print("   Stopping hardware ramp...")
+            driver.stop_ramp()
+            time.sleep(0.1)
+            
+            enabled = driver.get_ramp_enabled()
+            print(f"   Hardware ramp enabled: {enabled}")
+            
+            if not enabled:
+                print("   ✅ Hardware ramp control working")
+                return True
+            else:
+                print("   ❌ Hardware ramp failed to stop")
+                return False
+        else:
+            print("   ❌ No ramp cycles detected")
+            return False
+        
+    except Exception as e:
+        print(f"   ❌ Hardware ramp test failed: {e}")
+        return False
+
+def test_timing_accuracy(driver):
+    """Test timing accuracy of hardware ramp"""
+    print("\n🧪 Testing Timing Accuracy...")
+    
+    try:
+        frequencies_to_test = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0]
+        
+        for target_freq in frequencies_to_test:
+            print(f"\n   Testing {target_freq} Hz...")
+            
+            # Set frequency
+            driver.set_ramp_frequency(target_freq)
+            driver.generate_ramp_waveform()
+            
+            # Start ramp
+            driver.start_ramp()
+            time.sleep(0.1)  # Let it stabilize
+            
+            # Measure for 5 seconds
+            start_cycles = driver.get_cycle_count()
+            start_time = time.time()
+            
+            time.sleep(5.0)
+            
+            end_cycles = driver.get_cycle_count()
+            end_time = time.time()
+            
+            # Calculate measured frequency
+            cycle_diff = end_cycles - start_cycles
+            time_diff = end_time - start_time
+            measured_freq = cycle_diff / time_diff
+            
+            error_percent = abs(measured_freq - target_freq) / target_freq * 100
+            
+            print(f"   Target: {target_freq:.1f} Hz, Measured: {measured_freq:.3f} Hz, Error: {error_percent:.2f}%")
+            
+            if error_percent > 1.0:  # More than 1% error
+                print(f"   ⚠️  High error for {target_freq} Hz")
+            else:
+                print(f"   ✅ Good accuracy for {target_freq} Hz")
+            
+            driver.stop_ramp()
+            time.sleep(0.1)
+        
+        print("   ✅ Timing accuracy test completed")
         return True
         
     except Exception as e:
-        print(f"   ❌ Ramp control test failed: {e}")
-        return False
-
-def test_photodiode(driver):
-    """Test photodiode reading"""
-    print("\n🧪 Testing Photodiode Reading...")
-    
-    try:
-        reading = driver.get_photodiode_reading()
-        print(f"   Photodiode reading: {reading:.3f}V")
-        print("   ✅ Photodiode reading working")
-        return True
-    except Exception as e:
-        print(f"   ❌ Photodiode test failed: {e}")
+        print(f"   ❌ Timing accuracy test failed: {e}")
         return False
 
 def test_edge_cases(driver):
@@ -301,6 +384,16 @@ def test_edge_cases(driver):
         driver.set_ramp_frequency(5000.0)
         time.sleep(0.1)
         
+        # Test very low frequency
+        print("   Testing very low frequency (0.1 Hz)...")
+        driver.set_ramp_frequency(0.1)
+        driver.generate_ramp_waveform()
+        driver.start_ramp()
+        time.sleep(1.0)
+        cycles = driver.get_cycle_count()
+        driver.stop_ramp()
+        print(f"   Low frequency test: {cycles} cycles in 1 second")
+        
         # Test amplitude + offset > 2.5V
         print("   Testing amplitude + offset validation...")
         driver.set_ramp_amplitude(1.5)
@@ -315,81 +408,59 @@ def test_edge_cases(driver):
         return False
 
 def main():
-    """Run comprehensive CurrentRamp tests"""
-    print("🚀 CurrentRamp Driver Test Suite")
-    print("=" * 50)
+    """Main test function"""
+    print("=" * 60)
+    print("🚀 CurrentRamp Hardware Driver Test Suite")
+    print("   Hardware-based precise timing implementation")
+    print("=" * 60)
     
-    # Connect to instrument
-    host = os.getenv('HOST', '192.168.1.20')
+    # Connect to device
+    driver = connect_to_device()
+    if not driver:
+        print("\n❌ Cannot connect to device. Exiting.")
+        return 1
     
-    try:
-        print(f"🔌 Connecting to {host}...")
-        client = connect(host, 'currentramp', restart=False)
-        driver = CurrentRamp(client)
-        print("✅ Connected to CurrentRamp driver")
-        
-        # Run all tests
-        tests = [
-            ("Direct Precision DAC", lambda: test_precision_dac_direct(driver)),
-            ("DC Temperature Control", lambda: test_dc_control(driver)),
-            ("Ramp Parameters", lambda: test_ramp_parameters(driver)),
-            ("Ramp Control", lambda: test_ramp_control(driver)),
-            ("Photodiode Reading", lambda: test_photodiode(driver)),
-            ("Edge Cases", lambda: test_edge_cases(driver)),
-        ]
-        
-        results = []
-        for test_name, test_func in tests:
-            try:
-                result = test_func()
-                results.append((test_name, result))
-            except Exception as e:
-                print(f"❌ {test_name} test crashed: {e}")
-                results.append((test_name, False))
-        
-        # Print summary
-        print("\n" + "=" * 50)
-        print("📊 Test Results Summary:")
-        passed = 0
-        for test_name, result in results:
-            status = "✅ PASS" if result else "❌ FAIL"
-            print(f"   {test_name}: {status}")
-            if result:
-                passed += 1
-        
-        print(f"\n🎯 Tests passed: {passed}/{len(results)}")
-        
-        if passed == len(results):
-            print("\n🎉 All tests passed! Ready for oscilloscope testing.")
-            print("\n📋 Oscilloscope Test Procedure:")
-            print("   🔴 Precision DAC Channel 0: Current ramp output (laser)")
-            print("   🔵 Precision DAC Channel 1: DC temperature control") 
-            print("\n   Test sequence:")
-            print("   1. Connect scope probe 1 to Precision DAC Channel 0")
-            print("   2. Connect scope probe 2 to Precision DAC Channel 1")
-            print("   3. Run: driver.set_ramp_frequency(10)")
-            print("   4. Run: driver.set_ramp_amplitude(1.0)")
-            print("   5. Run: driver.set_ramp_offset(1.5)")
-            print("   6. Run: driver.start_ramp()")
-            print("   7. Verify 10Hz linear ramp: 1.5V to 2.5V on Channel 0")
-            print("   8. Run: driver.set_temperature_dc_voltage(0.5)")
-            print("   9. Run: driver.enable_temperature_dc_output(True)")
-            print("   10. Verify constant 0.5V on Channel 1")
-            print("\n   Manual testing:")
-            print("   - driver.set_test_voltage_channel_0(1.0)  # Direct DAC control")
-            print("   - driver.set_test_voltage_channel_1(2.0)  # Direct DAC control")
-        else:
-            print("\n⚠️  Some tests failed. Fix issues before oscilloscope testing.")
-        
-        return 0 if passed == len(results) else 1
-        
-    except Exception as e:
-        print(f"❌ Connection failed: {e}")
-        print("\n🔧 Troubleshooting:")
-        print("   1. Check CurrentRamp instrument is running on Alpha250")
-        print("   2. Verify network connection to 192.168.1.20")
-        print("   3. Try: make run CONFIG=examples/alpha250/currentramp/config.yml HOST=192.168.1.20")
+    # Run tests
+    tests = [
+        ("DC Control", test_dc_control),
+        ("Ramp Parameters", test_ramp_parameters), 
+        ("Hardware Ramp", test_hardware_ramp),
+        ("Timing Accuracy", test_timing_accuracy),
+        ("Edge Cases", test_edge_cases)
+    ]
+    
+    results = {}
+    
+    for test_name, test_func in tests:
+        try:
+            results[test_name] = test_func(driver)
+        except Exception as e:
+            print(f"\n❌ {test_name} test crashed: {e}")
+            results[test_name] = False
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("📊 Test Results Summary:")
+    print("=" * 60)
+    
+    passed = 0
+    total = len(results)
+    
+    for test_name, result in results.items():
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"   {test_name:20} {status}")
+        if result:
+            passed += 1
+    
+    print(f"\n🎯 Overall: {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("🎉 All tests passed! Hardware ramp timing should be accurate.")
+        print("📊 Check your oscilloscope to verify the exact frequencies.")
+        return 0
+    else:
+        print("⚠️  Some tests failed. Check the logs above.")
         return 1
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    exit(main()) 

@@ -10,6 +10,8 @@ cores:
   - fpga/cores/edge_detector_v1_0
   - fpga/cores/comparator_v1_0
   - fpga/cores/unrandomizer_v1_0
+  # DDS core for precise timing generation
+  - fpga/cores/axis_constant_v1_0
   # Precision DAC core for Alpha250
   - boards/alpha250/cores/precision_dac_v1_0
   - boards/alpha250/cores/spi_cfg_v1_0
@@ -34,12 +36,16 @@ memory:
   - name: xadc
     offset: '0x43C00000'
     range: 64K
+  # Hardware ramp data buffer
+  - name: ramp_data
+    range: 4K
+    offset: '0x40000000'
   - name: adc
     range: 256K
-    offset: '0x40000000'
+    offset: '0x40001000'
   - name: dac
     range: 256K
-    offset: '0x40040000'
+    offset: '0x40041000'
 
 control_registers:
   # MMCM control
@@ -47,12 +53,20 @@ control_registers:
   # Precision DAC control registers
   - precision_dac_ctl
   - precision_dac_data[2]
+  # Hardware ramp generation
+  - ramp_freq_incr        # Phase increment for ramp frequency
+  - ramp_amplitude_reg    # Amplitude control in hardware
+  - ramp_offset_reg       # Offset control in hardware
+  - ramp_enable           # Hardware ramp enable/disable
+  - ramp_reset            # Reset ramp phase accumulator
   - trig
 
 status_registers:
   # Real-time data
   - adc[n_adc]          # Raw ADC values for debugging
   - system_status       # Error flags, overflows, etc.
+  - ramp_phase          # Current ramp phase for monitoring
+  - cycle_count         # Number of completed ramp cycles
 
 ps_control_registers:
   - spi_cfg_data
@@ -71,6 +85,9 @@ parameters:
   dac_width: 16         # DAC width (16 bits)
   adc_width: 16         # ADC width (16 bits)
   n_adc: 2              # Number of ADC channels
+  
+  # Hardware ramp parameters
+  ramp_phase_width: 32  # Phase accumulator width for ramp timing
   samples_per_cycle: 1000    # Default samples per 10Hz cycle
   base_frequency: 10    # Base ramp frequency (Hz)
   
@@ -83,6 +100,7 @@ parameters:
 
 xdc:
   - boards/alpha250/config/ports.xdc
+  - ./expansion_connector.xdc
 
 drivers:
   # Required Alpha250 drivers (must be in correct order)
