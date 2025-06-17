@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADC Monitor - CurrentRamp</title>
+    <link rel="stylesheet" type="text/css" href="main.css">
+    <style>
+        .adc-monitor-container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        
+        .adc-controls {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .adc-canvas-container {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        #adc-canvas {
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .control-group {
+            display: inline-block;
+            margin: 0 15px 10px 0;
+            vertical-align: top;
+        }
+        
+        .control-group label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #495057;
+        }
+        
+        .btn-group {
+            margin-top: 15px;
+        }
+        
+        .status-panel {
+            background: #e9ecef;
+            border-radius: 3px;
+            padding: 10px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-monitoring { background-color: #28a745; }
+        .status-stopped { background-color: #6c757d; }
+        .status-error { background-color: #dc3545; }
+        
+        .export-section {
+            border-top: 1px solid #dee2e6;
+            padding-top: 15px;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>ADC Input Monitor</h1>
+            <p>Real-time monitoring of ADC input data paired with DAC output</p>
+        </div>
+        
+        <div class="adc-monitor-container">
+            <!-- ADC Monitor Controls -->
+            <div class="adc-controls">
+                <h3>Monitoring Controls</h3>
+                
+                <div class="control-group">
+                    <label>Monitor Status:</label>
+                    <div id="monitor-status">
+                        <span id="status-indicator" class="status-indicator status-stopped"></span>
+                        <span id="status-text">Stopped</span>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <label>ADC Channel:</label>
+                    <select id="adc-channel-select" class="form-control" style="width: 120px;">
+                        <option value="0">Channel 0</option>
+                        <option value="1">Channel 1</option>
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <label>Update Rate:</label>
+                    <select id="update-rate-select" class="form-control" style="width: 120px;">
+                        <option value="50">20 Hz (50ms)</option>
+                        <option value="100" selected>10 Hz (100ms)</option>
+                        <option value="200">5 Hz (200ms)</option>
+                        <option value="500">2 Hz (500ms)</option>
+                        <option value="1000">1 Hz (1s)</option>
+                    </select>
+                </div>
+                
+                <div class="btn-group">
+                    <button id="start-monitoring" class="btn btn-success">Start Monitoring</button>
+                    <button id="stop-monitoring" class="btn btn-danger" disabled>Stop Monitoring</button>
+                    <button id="capture-snapshot" class="btn btn-info">Capture Snapshot</button>
+                    <button id="clear-display" class="btn btn-secondary">Clear Display</button>
+                </div>
+                
+                <!-- Status Panel -->
+                <div class="status-panel" id="status-panel">
+                    <div>Status: Ready</div>
+                    <div id="data-stats">No data captured yet</div>
+                </div>
+                
+                <!-- Export Section -->
+                <div class="export-section">
+                    <h4>Data Export</h4>
+                    <button id="export-csv" class="btn btn-outline-primary">Export CSV</button>
+                    <button id="export-json" class="btn btn-outline-primary">Export JSON</button>
+                    <button id="save-image" class="btn btn-outline-primary">Save Plot Image</button>
+                </div>
+            </div>
+            
+            <!-- Canvas for Live Plot -->
+            <div class="adc-canvas-container">
+                <h3>Live ADC Data Plot</h3>
+                <canvas id="adc-canvas" width="800" height="400"></canvas>
+                <div style="margin-top: 10px; font-size: 12px; color: #6c757d;">
+                    <strong>Legend:</strong> 
+                    <span style="color: #ff0000;">■ ADC Ch0</span> | 
+                    <span style="color: #00ff00;">■ ADC Ch1</span> | 
+                    <span style="color: #0000ff;">-- DAC Output</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Back to Main Controls -->
+    <div style="text-align: center; margin: 20px;">
+        <a href="voltage-control.html" class="btn btn-outline-secondary">← Back to Voltage Control</a>
+        <a href="index.html" class="btn btn-outline-secondary">← Back to Main</a>
+    </div>
+
+    <script>
+        // Initialize ADC Monitor when page loads
+        window.addEventListener('HTMLImportsLoaded', () => {
+            // This will be called after the Koheron client is initialized
+            initializeADCMonitor();
+        });
+
+        function initializeADCMonitor() {
+            // ADC Monitor will be initialized by the app.ts after client connection
+            console.log('ADC Monitor page ready');
+        }
+    </script>
+</body>
+</html> 

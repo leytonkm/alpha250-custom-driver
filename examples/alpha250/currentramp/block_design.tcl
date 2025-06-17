@@ -124,4 +124,50 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
+####################################
+# Continuous BRAM Data Acquisition
+# Using proven pattern from working examples
+####################################
+
+# Add BRAM for continuous ADC and DAC data recording
+source $sdk_path/fpga/lib/bram.tcl
+add_bram adc
+add_bram dac
+
+# Add address counter using the exact working Alpha250 pattern
+cell koheron:user:address_counter:1.0 address_counter {
+  COUNT_WIDTH [get_memory_addr_width adc]
+} {
+  clken [get_constant_pin 1 1]
+  clk adc_dac/adc_clk
+  trig [get_slice_pin [ctl_pin trig] 0 0]
+}
+
+# Connect ADC BRAM to capture both ADC input AND ramp output for monitoring
+# Following Alpha250 pattern: ADC BRAM captures data, DAC BRAM outputs data
+# Lower 16 bits = ADC channel 0 (input signal)
+# Upper 16 bits = ramp output signal (for monitoring correlation)
+connect_cell blk_mem_gen_adc {
+  addrb address_counter/address
+  clkb adc_dac/adc_clk
+  dinb [get_concat_pin [list adc_dac/adc0 ramp_output_mux/dout]]
+  enb [get_constant_pin 1 1]
+  rstb [get_constant_pin 0 1]
+  web address_counter/wen
+}
+
+# Connect DAC BRAM following the correct Alpha250 pattern
+# DAC BRAM is OUTPUT-ONLY (BRAM → DAC), not for capturing data
+# This is used to output pre-programmed waveforms to DAC (not used in our case)
+connect_cell blk_mem_gen_dac {
+  addrb address_counter/address
+  clkb adc_dac/adc_clk
+  enb [get_constant_pin 1 1]
+  rstb [get_constant_pin 0 1]
+  web [get_constant_pin 0 4]
+}
+
+# Connect acquisition counter to status register for monitoring
+connect_pins [sts_pin acquisition_count] address_counter/address
+
 # Note: Test signals removed for initial build - can be added back later 

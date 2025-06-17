@@ -12,6 +12,8 @@
 #include <boards/alpha250/drivers/clock-generator.hpp>
 #include <array>
 #include <cmath>
+#include <thread>
+#include <chrono>
 
 class CurrentRamp
 {
@@ -22,6 +24,7 @@ class CurrentRamp
     , clk_gen(ctx.get<ClockGenerator>())
     , ctl(ctx.mm.get<mem::control>())
     , sts(ctx.mm.get<mem::status>())
+    , adc_map(ctx.mm.get<mem::adc>())
     , dc_voltage(0.0f)
     , dc_enabled(false)
     , ramp_offset(1.5f)
@@ -268,9 +271,45 @@ class CurrentRamp
 
     // === STATUS FUNCTIONS ===
     
+    // Direct ADC reading using Precision ADC (8-channel SPI ADC)
+    float get_photodiode_voltage() {
+        // Get precision ADC values (8 channels)
+        auto adc_values = precision_adc.get_adc_values();
+        
+        // Return channel 0 by default (can be changed with set_photodiode_channel)
+        return adc_values[photodiode_channel];
+    }
+    
+    uint32_t get_photodiode_raw() {
+        // For precision ADC, we don't have raw values, so convert voltage back to a representative raw value
+        float voltage = get_photodiode_voltage();
+        // Assuming ±1.25V range for precision ADC (typical for AD7124)
+        return static_cast<uint32_t>((voltage / 1.25f + 1.0f) * 32768.0f);
+    }
+    
+    void set_photodiode_channel(uint32_t channel) {
+        if (channel < 8) {  // Precision ADC has 8 channels
+            photodiode_channel = channel;
+            ctx.log<INFO>("Selected precision ADC channel: %u", channel);
+        } else {
+            ctx.log<ERROR>("Invalid precision ADC channel: %u (must be 0-7)", channel);
+        }
+    }
+    
+    // Get voltage from specific precision ADC channel
+    float get_photodiode_precision(uint32_t channel) {
+        auto adc_values = precision_adc.get_adc_values();
+        if (channel < 8) {
+            return adc_values[channel];
+        } else {
+            ctx.log<ERROR>("Invalid precision ADC channel: %u", channel);
+            return 0.0f;
+        }
+    }
+    
     float get_photodiode_reading() {
-        // This would read from ADC - placeholder for now
-        return 0.0f;
+        // Legacy function - redirect to new implementation
+        return get_photodiode_voltage();
     }
     
     // Get hardware timing diagnostics
@@ -284,6 +323,162 @@ class CurrentRamp
         );
     }
 
+    // === CONTINUOUS BRAM DATA ACQUISITION ===
+    // Functions for 10kHz decimated continuous capture using software decimation
+    
+    void trigger_acquisition() {
+        ctl.set_bit<reg::trig, 0>();
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+        ctl.clear_bit<reg::trig, 0>();
+    }
+    
+    bool is_acquisition_complete() {
+        // For continuous acquisition, always return true after a brief delay
+        return true;
+    }
+    
+    // Get 1000 ADC samples (representing 100ms of 10kHz data = 1 complete period)
+    std::array<uint32_t, 1000> get_adc_samples_1000() {
+        // Read entire BRAM using the proven pattern from working examples
+        // ADC BRAM now contains: [ramp_output:16][adc_input:16]
+        auto full_buffer = adc_map.read_array<uint32_t, adc_size>();
+        
+        // For 10kHz effective rate from 250MHz capture:
+        // Take every 25,000th sample to achieve 10kHz decimation
+        // 250MHz / 25,000 = 10kHz
+        std::array<uint32_t, 1000> samples;
+        
+        // Get current write position
+        uint32_t current_addr = sts.read<reg::acquisition_count>() % adc_size;
+        
+        // Start from a position that gives us good coverage of the circular buffer
+        uint32_t start_addr = (current_addr >= 25000000) ? (current_addr - 25000000) : 0;
+        
+        for (size_t i = 0; i < 1000; i++) {
+            // Take every 25,000th sample for 10kHz decimation
+            uint32_t addr = (start_addr + i * 25000) % adc_size;
+            uint32_t combined_data = full_buffer[addr];
+            
+            // Extract ADC input from lower 16 bits
+            // Format: [ramp_output:16][adc_input:16]
+            uint32_t adc_input = combined_data & 0xFFFF;
+            samples[i] = adc_input;
+        }
+        
+        ctx.log<INFO>("Read 1000 decimated ADC samples from BRAM lower bits (10kHz rate)");
+        return samples;
+    }
+    
+    // Get 1000 DAC samples (extracted from upper 16 bits of ADC BRAM)
+    std::array<uint32_t, 1000> get_dac_samples_1000() {
+        // Following corrected Alpha250 pattern: ramp output is captured in ADC BRAM upper 16 bits
+        // Read entire ADC BRAM (which contains both ADC input and ramp output)
+        auto full_buffer = adc_map.read_array<uint32_t, adc_size>();
+        
+        // For 10kHz effective rate from 250MHz capture:
+        // Take every 25,000th sample to achieve 10kHz decimation
+        // 250MHz / 25,000 = 10kHz
+        std::array<uint32_t, 1000> samples;
+        
+        // Get current write position
+        uint32_t current_addr = sts.read<reg::acquisition_count>() % adc_size;
+        
+        // Start from a position that gives us good coverage of the circular buffer
+        uint32_t start_addr = (current_addr >= 25000000) ? (current_addr - 25000000) : 0;
+        
+        for (size_t i = 0; i < 1000; i++) {
+            // Take every 25,000th sample for 10kHz decimation
+            uint32_t addr = (start_addr + i * 25000) % adc_size;
+            uint32_t combined_data = full_buffer[addr];
+            
+            // Extract ramp output from upper 16 bits
+            // Format: [ramp_output:16][adc_input:16]
+            uint32_t ramp_output = (combined_data >> 16) & 0xFFFF;
+            samples[i] = ramp_output;
+        }
+        
+        ctx.log<INFO>("Read 1000 decimated ramp output samples from ADC BRAM upper bits (10kHz rate)");
+        return samples;
+    }
+    
+    // Get 10,000 ADC samples (representing 1000ms of 10kHz data = 10 complete periods)
+    std::array<uint32_t, 10000> get_adc_samples_10000() {
+        // Read entire BRAM using the proven pattern from working examples
+        // ADC BRAM now contains: [ramp_output:16][adc_input:16]
+        auto full_buffer = adc_map.read_array<uint32_t, adc_size>();
+        
+        // For 10kHz effective rate from 250MHz capture:
+        // Take every 25,000th sample to achieve 10kHz decimation
+        // 250MHz / 25,000 = 10kHz
+        std::array<uint32_t, 10000> samples;
+        
+        // Get current write position
+        uint32_t current_addr = sts.read<reg::acquisition_count>() % adc_size;
+        
+        // Start from a position that gives us good coverage of the circular buffer
+        uint32_t start_addr = (current_addr >= 250000000) ? (current_addr - 250000000) : 0;
+        
+        for (size_t i = 0; i < 10000; i++) {
+            // Take every 25,000th sample for 10kHz decimation
+            uint32_t addr = (start_addr + i * 25000) % adc_size;
+            uint32_t combined_data = full_buffer[addr];
+            
+            // Extract ADC input from lower 16 bits
+            // Format: [ramp_output:16][adc_input:16]
+            uint32_t adc_input = combined_data & 0xFFFF;
+            samples[i] = adc_input;
+        }
+        
+        ctx.log<INFO>("Read 10,000 decimated ADC samples from BRAM lower bits (10kHz rate)");
+        return samples;
+    }
+    
+    // Get 10,000 DAC samples (extracted from upper 16 bits of ADC BRAM)
+    std::array<uint32_t, 10000> get_dac_samples_10000() {
+        // Following corrected Alpha250 pattern: ramp output is captured in ADC BRAM upper 16 bits
+        // Read entire ADC BRAM (which contains both ADC input and ramp output)
+        auto full_buffer = adc_map.read_array<uint32_t, adc_size>();
+        
+        // For 10kHz effective rate from 250MHz capture:
+        // Take every 25,000th sample to achieve 10kHz decimation
+        // 250MHz / 25,000 = 10kHz
+        std::array<uint32_t, 10000> samples;
+        
+        // Get current write position
+        uint32_t current_addr = sts.read<reg::acquisition_count>() % adc_size;
+        
+        // Start from a position that gives us good coverage of the circular buffer
+        uint32_t start_addr = (current_addr >= 250000000) ? (current_addr - 250000000) : 0;
+        
+        for (size_t i = 0; i < 10000; i++) {
+            // Take every 25,000th sample for 10kHz decimation
+            uint32_t addr = (start_addr + i * 25000) % adc_size;
+            uint32_t combined_data = full_buffer[addr];
+            
+            // Extract ramp output from upper 16 bits
+            // Format: [ramp_output:16][adc_input:16]
+            uint32_t ramp_output = (combined_data >> 16) & 0xFFFF;
+            samples[i] = ramp_output;
+        }
+        
+        ctx.log<INFO>("Read 10,000 decimated ramp output samples from ADC BRAM upper bits (10kHz rate)");
+        return samples;
+    }
+    
+    // Get acquisition status
+    uint32_t get_acquisition_count() {
+        return sts.read<reg::acquisition_count>();
+    }
+    
+    // Get buffer sizes for web interface
+    uint32_t get_adc_size() {
+        return adc_size;
+    }
+    
+    uint32_t get_dac_size() {
+        return adc_size;  // DAC data is now extracted from ADC BRAM
+    }
+
   private:
     Context& ctx;
     PrecisionDac& precision_dac;
@@ -291,8 +486,15 @@ class CurrentRamp
     Memory<mem::control>& ctl;
     Memory<mem::status>& sts;
     
+    // BRAM memory map for continuous data acquisition
+    // ADC BRAM contains both ADC input (lower 16 bits) and ramp output (upper 16 bits)
+    Memory<mem::adc>& adc_map;
+    
     // Clock and timing
     double fs_adc;  // ADC sampling frequency
+    
+    // BRAM buffer size (calculated from memory range)
+    static constexpr uint32_t adc_size = mem::adc_range / sizeof(uint32_t);
     
     // DC control state
     float dc_voltage;

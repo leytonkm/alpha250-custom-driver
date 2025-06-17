@@ -8,14 +8,13 @@ cores:
   - fpga/cores/axi_ctl_register_v1_0
   - fpga/cores/axi_sts_register_v1_0
   - fpga/cores/edge_detector_v1_0
-  - fpga/cores/comparator_v1_0
-  - fpga/cores/unrandomizer_v1_0
+  - fpga/cores/latched_mux_v1_0
   # DDS core for precise timing generation
   - fpga/cores/axis_constant_v1_0
   # Precision DAC core for Alpha250
   - boards/alpha250/cores/precision_dac_v1_0
   - boards/alpha250/cores/spi_cfg_v1_0
-  - ./address_counter_v1_0
+  - examples/alpha250/adc-dac-bram/address_counter_v1_0
 
 memory:
   # Control registers
@@ -37,15 +36,12 @@ memory:
     offset: '0x43C00000'
     range: 64K
   # Hardware ramp data buffer
-  - name: ramp_data
-    range: 4K
-    offset: '0x40000000'
   - name: adc
     range: 256K
-    offset: '0x40001000'
+    offset: '0x40000000'
   - name: dac
     range: 256K
-    offset: '0x40041000'
+    offset: '0x40040000'
 
 control_registers:
   # MMCM control
@@ -59,7 +55,7 @@ control_registers:
   - ramp_offset_reg       # Offset control in hardware
   - ramp_enable           # Hardware ramp enable/disable
   - ramp_reset            # Reset ramp phase accumulator
-  - trig
+  - trig                  # BRAM trigger (matching working examples)
 
 status_registers:
   # Real-time data
@@ -67,6 +63,7 @@ status_registers:
   - system_status       # Error flags, overflows, etc.
   - ramp_phase          # Current ramp phase for monitoring
   - cycle_count         # Number of completed ramp cycles
+  - acquisition_count
 
 ps_control_registers:
   - spi_cfg_data
@@ -115,11 +112,12 @@ drivers:
   - boards/alpha250/drivers/precision-adc.hpp
   - boards/alpha250/drivers/precision-dac.hpp
   - boards/alpha250/drivers/spi-config.hpp
-  # Application drivers
   - ./currentramp.hpp
 
 web:
   - web/koheron.ts
+  - web/jquery.flot.d.ts
+  - web/plot-basics/plot-basics.ts
   - web/main.css
   - ./web/index.html
   - ./web/voltage-control.html

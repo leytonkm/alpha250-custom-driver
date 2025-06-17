@@ -38,8 +38,28 @@
       <section id="voltage-control"></section>
     </div>
   </div>
+  
+  <!-- ADC Monitor Link -->
+  <div class="row" style="margin-top: 20px;">
+    <div class="col-md-6 col-md-offset-3 text-center">
+      <a href="adc-monitor.html" class="btn btn-primary btn-lg">
+        <i class="glyphicon glyphicon-signal"></i> ADC Input Monitor
+      </a>
+      <p style="margin-top: 10px; color: #666;">
+        Live monitoring and graphing of ADC input data with loopback verification
+      </p>
+    </div>
+  </div>
 
 </div>
+
+  <!-- jQuery Flot plotting library (required for PlotBasics) -->
+  <script language="javascript" type="text/javascript" src="jquery.flot.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.resize.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.selection.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.time.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.axislabels.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.canvas.js"></script>
 
   <script src="app.js?random=<?php echo uniqid(); ?>"></script>
 

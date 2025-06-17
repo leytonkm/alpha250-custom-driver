@@ -122,4 +122,107 @@
 
     </div>
   </div>
+
+  <!-- Live Voltage vs Voltage Graphing Section -->
+  <div class="panel panel-default" style="margin-top: 20px;">
+    <div class="panel-heading">
+      <h4>High-Speed Laser Precision Analysis</h4>
+    </div>
+    <div class="panel-body">
+      
+      <!-- Graph Controls -->
+      <div class="form-group">
+        <label class="control-label"><strong>Continuous 10kHz Stream Monitoring:</strong></label>
+        
+        <!-- Status Display -->
+        <div class="form-inline" style="margin-bottom: 10px;">
+          <span class="form-control-static"><strong>Status:</strong></span>
+          <span id="graph-status-display" class="label label-default" style="margin-left: 15px;">Stopped</span>
+        </div>
+
+        <!-- Sampling Frequency Control -->
+        <div class="form-inline" style="margin-bottom: 8px;">
+          <label class="control-label" style="width: 120px;">Update Rate:</label>
+          <select id="sampling-rate-select" class="form-control" style="width: 120px;">
+            <option value="1000" selected>1 Hz (1000ms)</option>
+            <option value="500">2 Hz (500ms)</option>
+            <option value="200">5 Hz (200ms)</option>
+            <option value="100">10 Hz (100ms)</option>
+          </select>
+          <span class="form-control-static" style="margin-left: 10px;">Display Update Interval</span>
+        </div>
+
+        <!-- Data Collection Settings -->
+        <div class="form-inline" style="margin-bottom: 8px;">
+          <label class="control-label" style="width: 120px;">Data Points:</label>
+          <select id="data-points-select" class="form-control" style="width: 120px;">
+            <option value="1000">1K points</option>
+            <option value="5000">5K points</option>
+            <option value="10000" selected>10K points</option>
+          </select>
+          <span class="form-control-static" style="margin-left: 10px;">Per Update (1 second = 10 periods)</span>
+        </div>
+
+        <!-- Time Window Controls -->
+        <div class="form-inline" style="margin-bottom: 8px;">
+          <label class="control-label" style="width: 120px;">Time Window:</label>
+          <select id="time-window-select" class="form-control" style="width: 120px;">
+            <option value="0.5">0.5 seconds</option>
+            <option value="1" selected>1 second</option>
+            <option value="2">2 seconds</option>
+            <option value="5">5 seconds</option>
+          </select>
+          <span class="form-control-static" style="margin-left: 10px;">Display Duration</span>
+        </div>
+
+        <!-- ADC Channel Selection -->
+        <div class="form-inline" style="margin-bottom: 8px;">
+          <label class="control-label" style="width: 120px;">ADC Channel:</label>
+          <select id="adc-channel-select" class="form-control" style="width: 120px;">
+            <option value="0" selected>Channel 0</option>
+            <option value="1">Channel 1</option>
+          </select>
+          <span class="form-control-static" style="margin-left: 10px;">Input Signal</span>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="margin-top: 15px;">
+          <button id="start-graphing" class="btn btn-success btn-sm" style="margin-right: 10px;">Start Monitoring</button>
+          <button id="pause-graphing" class="btn btn-warning btn-sm" style="margin-right: 10px;" disabled>Pause</button>
+          <button id="stop-graphing" class="btn btn-danger btn-sm" style="margin-right: 10px;" disabled>Stop</button>
+          <button id="clear-graph" class="btn btn-default btn-sm" style="margin-right: 10px;">Clear</button>
+          <button id="export-data" class="btn btn-info btn-sm">Export Data</button>
+        </div>
+      </div>
+
+      <!-- Statistics Display -->
+      <div class="form-group" style="margin-top: 20px;">
+        <label class="control-label"><strong>Live Statistics:</strong></label>
+        <div id="plot-statistics" class="well well-sm" style="margin-top: 10px;">
+          <p style="text-align: center; color: #888; margin: 0;">Start monitoring to see real-time statistics</p>
+        </div>
+      </div>
+
+      <!-- Plot Container -->
+      <div id="voltage-plot-placeholder" style="margin-top: 20px; height: 400px; border: 1px solid #ddd;">
+        <!-- Plot title and datapoint displays that PlotBasics expects -->
+        <div style="position: relative;">
+          <span id="plot-title" style="position: absolute; top: 10px; left: 10px; font-weight: bold; z-index: 100;">Time vs Voltage</span>
+          <span id="hover-datapoint" style="position: absolute; top: 30px; left: 10px; background: rgba(255,255,255,0.8); padding: 2px 5px; border-radius: 3px; font-size: 12px; z-index: 100; display: none;"></span>
+          <span id="click-datapoint" style="position: absolute; top: 50px; left: 10px; background: rgba(255,255,255,0.8); padding: 2px 5px; border-radius: 3px; font-size: 12px; z-index: 100; display: none;"></span>
+          <span id="peak-datapoint" style="position: absolute; top: 70px; left: 10px; background: rgba(255,255,255,0.8); padding: 2px 5px; border-radius: 3px; font-size: 12px; z-index: 100; display: none;"></span>
+        </div>
+        <!-- Plot will be inserted here by PlotBasics -->
+      </div>
+
+      <div class="help-block" style="margin-top: 15px;">
+        <small>
+          <strong>Continuous Monitoring:</strong> Captures synchronized ADC input + DAC output at 10kHz decimated rate<br>
+          <strong>Perfect Timing:</strong> Shows correlation between laser output and photodiode input<br>
+          <strong>Data Rate:</strong> 10,000 samples per second for 1-second windows showing 10 complete periods
+        </small>
+      </div>
+
+    </div>
+  </div>
 </template> 
