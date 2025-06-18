@@ -3,16 +3,40 @@ class App {
     private imports: Imports;
     private voltageControl: VoltageControl;
     private voltageControlApp: VoltageControlApp;
+    private oscilloscope: Oscilloscope;
+    private oscilloscopePlot: OscilloscopePlot;
+    private oscilloscopeApp: OscilloscopeApp;
 
     constructor(window: Window, document: Document, ip: string) {
         let sockpoolSize: number = 5;
         let client = new Client(ip, sockpoolSize);
 
         window.addEventListener('HTMLImportsLoaded', () => {
+            console.log('HTMLImportsLoaded event fired');
+            this.imports = new Imports(document);
+            console.log('Imports created');
+            
             client.init( () => {
-                this.imports = new Imports(document);
+                console.log('Client initialized');
                 this.voltageControl = new VoltageControl(client);
                 this.voltageControlApp = new VoltageControlApp(document, this.voltageControl);
+                
+                // Initialize oscilloscope (with error handling)
+                try {
+                    console.log('Creating Oscilloscope...');
+                    this.oscilloscope = new Oscilloscope(client);
+                    console.log('Oscilloscope created successfully');
+                    
+                    console.log('Creating OscilloscopePlot...');
+                    this.oscilloscopePlot = new OscilloscopePlot(this.oscilloscope);
+                    console.log('OscilloscopePlot created successfully');
+                    
+                    console.log('Creating OscilloscopeApp...');
+                    this.oscilloscopeApp = new OscilloscopeApp(document, this.oscilloscope);
+                    console.log('OscilloscopeApp created successfully');
+                } catch (error) {
+                    console.error('Error initializing oscilloscope:', error);
+                }
             });
         }, false);
 

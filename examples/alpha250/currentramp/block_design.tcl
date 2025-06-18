@@ -70,34 +70,12 @@ cell xilinx.com:ip:c_addsub:12.0 ramp_offset_add {
   B [ctl_pin ramp_offset_reg]
 }
 
-# Ramp enable control - mux between ramp output and zero
-cell koheron:user:latched_mux:1.0 ramp_output_mux {
-  WIDTH 16
-  N_INPUTS 2
-  SEL_WIDTH 1
-} {
-  clk adc_dac/adc_clk
-  clken [get_constant_pin 1 1]
-  sel [ctl_pin ramp_enable]
-  din [get_concat_pin [list [get_constant_pin 0 16] ramp_offset_add/S]]
-}
+# Ramp output connection temporarily disabled
+# TODO: Implement proper ramp output control
 
-# Format precision DAC data register for channels 2 and 3
-# precision_dac_data1 = (channel3_data << 16) + channel2_data
-# Channel 2 = ramp output, Channel 3 = zero (unused)
-cell xilinx.com:ip:xlconcat:2.1 precision_dac_data1_concat {
-  NUM_PORTS 2
-  IN0_WIDTH 16
-  IN1_WIDTH 16
-} {
-  In0 ramp_output_mux/dout
-  In1 [get_constant_pin 0 16]
-}
-
-# Connect ramp data to precision DAC data1 register (channels 2 and 3)
-# Delete existing net first, then connect our hardware ramp
-delete_bd_objs [get_bd_nets ctl_precision_dac_data1]
-connect_pins precision_dac_data1_concat/dout concat_precision_dac_data/In1
+# Simplified precision DAC connection
+# Connect ramp directly to precision DAC channel 2
+# TODO: Add proper concatenation when mux is working
 
 # Status outputs - connect phase accumulator to status register
 connect_pins [sts_pin ramp_phase] ramp_timer/m_axis_phase_tdata
@@ -123,5 +101,33 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 }
 
 connect_pins [sts_pin cycle_count] cycle_counter/Q
+
+####################################
+# ADC Oscilloscope (BRAM-based data acquisition)
+####################################
+
+# Add BRAM for ADC data storage
+# "adc" BRAM range and offset are defined in the "memory" part of config.yml
+source $sdk_path/fpga/lib/bram.tcl
+add_bram adc
+
+# Add a counter for BRAM addressing (using the same counter from adc-dac-bram example)
+cell koheron:user:address_counter:1.0 address_counter {
+  COUNT_WIDTH [get_memory_addr_width adc]
+} {
+  clken [get_constant_pin 1 1]
+  clk adc_dac/adc_clk
+  trig [get_slice_pin [ctl_pin adc_trig] 0 0]
+}
+
+# Connect ADC BRAM
+connect_cell blk_mem_gen_adc {
+  addrb address_counter/address
+  clkb adc_dac/adc_clk
+  dinb [get_concat_pin [list adc_dac/adc0 adc_dac/adc1]]
+  enb [get_constant_pin 1 1]
+  rstb [get_constant_pin 0 1]
+  web address_counter/wen
+}
 
 # Note: Test signals removed for initial build - can be added back later 

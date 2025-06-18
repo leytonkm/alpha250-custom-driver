@@ -24,6 +24,7 @@
 
   <link rel="import" href="navigation.html" data-parent="navigation">
   <link rel="import" href="voltage-control.html" data-parent="voltage-control">
+  <link rel="import" href="oscilloscope.html" data-parent="oscilloscope">
 
 </head>
 
@@ -39,7 +40,20 @@
     </div>
   </div>
 
+  <div class="row">
+    <div class="col-md-12">
+      <section id="oscilloscope"></section>
+    </div>
+  </div>
+
 </div>
+
+  <script language="javascript" type="text/javascript" src="jquery.flot.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.resize.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.selection.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.time.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.axislabels.js"></script>
+  <script language="javascript" type="text/javascript" src="jquery.flot.canvas.js"></script>
 
   <script src="app.js?random=<?php echo uniqid(); ?>"></script>
 

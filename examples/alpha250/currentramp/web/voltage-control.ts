@@ -157,7 +157,9 @@ class VoltageControlApp {
         }
 
         this.setupEventListeners();
-        this.updateStatus();
+        
+        // Initial status update (delayed to allow WebSocket connection to establish)
+        setTimeout(() => this.updateStatus(), 500);
     }
 
     private setupEventListeners(): void {

@@ -42,7 +42,7 @@ memory:
     offset: '0x40000000'
   - name: adc
     range: 256K
-    offset: '0x40001000'
+    offset: '0x40000000'
   - name: dac
     range: 256K
     offset: '0x40041000'
@@ -60,6 +60,8 @@ control_registers:
   - ramp_enable           # Hardware ramp enable/disable
   - ramp_reset            # Reset ramp phase accumulator
   - trig
+  # ADC oscilloscope
+  - adc_trig              # ADC acquisition trigger
 
 status_registers:
   # Real-time data
@@ -120,8 +122,16 @@ drivers:
 
 web:
   - web/koheron.ts
+  - web/jquery.flot.d.ts
   - web/main.css
   - ./web/index.html
   - ./web/voltage-control.html
   - ./web/voltage-control.ts
+  - ./web/oscilloscope.html
+  - ./web/oscilloscope.ts
+  - ./web/simple-plot.ts
+  - ./web/oscilloscope-plot.ts
+  - ./web/oscilloscope-app.ts
+  - web/plot-basics/plot-basics.html
+  - web/plot-basics/plot-basics.ts
   - ./web/app.ts

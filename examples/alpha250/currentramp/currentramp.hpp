@@ -10,18 +10,26 @@
 #include <context.hpp>
 #include <boards/alpha250/drivers/precision-dac.hpp>
 #include <boards/alpha250/drivers/clock-generator.hpp>
+#include <boards/alpha250/drivers/ltc2157.hpp>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <thread>
 
 class CurrentRamp
 {
   public:
+    static constexpr uint32_t adc_buffer_size = 4096;  // ADC buffer size
+
     CurrentRamp(Context& ctx_)
     : ctx(ctx_)
     , precision_dac(ctx.get<PrecisionDac>())
     , clk_gen(ctx.get<ClockGenerator>())
+    , ltc2157(ctx.get<Ltc2157>())
     , ctl(ctx.mm.get<mem::control>())
     , sts(ctx.mm.get<mem::status>())
+    , adc_map(ctx.mm.get<mem::adc>())
+
     , dc_voltage(0.0f)
     , dc_enabled(false)
     , ramp_offset(1.5f)
@@ -190,6 +198,79 @@ class CurrentRamp
         ctx.log<INFO>("Hardware ramp stopped - output set to 0V");
     }
     
+    // === ADC OSCILLOSCOPE FUNCTIONS ===
+    // BRAM-based ADC data acquisition for oscilloscope functionality
+    
+    void trigger_adc_acquisition() {
+        // Trigger ADC data acquisition into BRAM
+        ctl.set_bit<reg::adc_trig, 0>();
+        ctl.clear_bit<reg::adc_trig, 0>();
+    }
+    
+    std::array<int16_t, adc_buffer_size> get_adc_data() {
+        // Read ADC data from BRAM (similar to adc-dac-bram example)
+        // The BRAM stores 32-bit words containing both ADC channels
+        auto raw_data = adc_map.read_array<uint32_t, adc_buffer_size>();
+        
+        std::array<int16_t, adc_buffer_size> adc_channel_0;
+        
+        // Extract channel 0 (lower 16 bits) from each 32-bit word
+        for (size_t i = 0; i < adc_buffer_size; i++) {
+            adc_channel_0[i] = static_cast<int16_t>(raw_data[i] & 0xFFFF);
+        }
+        
+        return adc_channel_0;
+    }
+    
+    std::array<float, adc_buffer_size> get_adc_data_volts() {
+        auto raw_data = get_adc_data();
+        std::array<float, adc_buffer_size> voltage_data;
+        
+        // Use proper LTC2157 calibration (similar to FFT example)
+        // Get calibrated gain and offset for channel 0
+        float gain = ltc2157.get_gain(0);
+        float offset = ltc2157.get_offset(0);
+        float vin_range = ltc2157.get_input_voltage_range(0);
+        
+        ctx.log<INFO>("ADC calibration: gain=%.3f, offset=%.3f, vin_range=%.3f", 
+                      static_cast<double>(gain), static_cast<double>(offset), static_cast<double>(vin_range));
+        
+        for (size_t i = 0; i < adc_buffer_size; i++) {
+            int16_t adc_code = raw_data[i];
+            
+            // Apply calibration: (ADC_code - offset) / gain = voltage
+            if (std::abs(gain) > std::numeric_limits<float>::epsilon()) {
+                voltage_data[i] = (static_cast<float>(adc_code) - offset) / gain;
+            } else {
+                voltage_data[i] = 0.0f; // Fallback if gain is invalid
+            }
+        }
+        return voltage_data;
+    }
+    
+    uint32_t get_adc_buffer_size() const {
+        return adc_buffer_size;
+    }
+    
+    // Return sampling rate for time axis calculation  
+    double get_adc_sampling_rate() const {
+        return fs_adc;
+    }
+    
+    // Oscilloscope configuration
+    void set_time_range(double time_range_ms) {
+        if (time_range_ms < 0.1 || time_range_ms > 1000.0) {
+            ctx.log<ERROR>("Invalid time range: %.3f ms (must be 0.1-1000 ms)", time_range_ms);
+            return;
+        }
+        oscilloscope_time_range = time_range_ms;
+        ctx.log<INFO>("Oscilloscope time range set to: %.3f ms", time_range_ms);
+    }
+    
+    double get_time_range() const {
+        return oscilloscope_time_range;
+    }
+    
     // Manual ramp control for testing
     void set_ramp_manual(float sawtooth_position) {
         // sawtooth_position: 0.0 = start (offset), 1.0 = peak (offset + amplitude)
@@ -288,8 +369,11 @@ class CurrentRamp
     Context& ctx;
     PrecisionDac& precision_dac;
     ClockGenerator& clk_gen;
+    Ltc2157& ltc2157;
     Memory<mem::control>& ctl;
     Memory<mem::status>& sts;
+    Memory<mem::adc>& adc_map;
+
     
     // Clock and timing
     double fs_adc;  // ADC sampling frequency
@@ -303,6 +387,9 @@ class CurrentRamp
     float ramp_amplitude;
     double ramp_frequency;
     bool hardware_ramp_enabled;
+    
+    // Oscilloscope state
+    double oscilloscope_time_range = 10.0;  // Default 10ms
 };
 
 #endif // __DRIVERS_CURRENT_RAMP_HPP__ 
