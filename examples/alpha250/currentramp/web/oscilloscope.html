@@ -12,30 +12,68 @@
       <!-- Plot basics controls -->
       <div id="oscilloscope-plot-basics"></div>
       
-      <!-- Oscilloscope controls -->
-      <div class="form-group">
-        <label class="control-label">Time Range:</label>
-        <div class="form-inline">
-          <input type="number" 
-                 id="time-range-input" 
-                 class="form-control oscilloscope-input" 
-                 data-command="setTimeRange"
-                 value="10" 
-                 step="1" 
-                 min="1" 
-                 max="1000" 
-                 style="width: 80px;">
-          <span class="form-control-static">ms</span>
+      <!-- Oscilloscope Controls Row 1: Time and Voltage Scale -->
+      <div class="row" style="margin-bottom: 15px;">
+        <div class="col-md-3">
+          <label class="control-label">Time/Div:</label>
+          <div class="form-inline">
+            <select id="time-per-div" class="form-control oscilloscope-input" data-command="setTimePerDiv" style="width: 120px;">
+              <option value="1">1 µs</option>
+              <option value="2">2 µs</option>
+              <option value="5">5 µs</option>
+              <option value="10">10 µs</option>
+              <option value="20">20 µs</option>
+              <option value="26.2" selected>26.2 µs (fit)</option>
+              <option value="50">50 µs</option>
+              <option value="100">100 µs</option>
+              <option value="200">200 µs</option>
+              <option value="500">500 µs</option>
+              <option value="1000">1 ms</option>
+              <option value="2000">2 ms</option>
+              <option value="5000">5 ms</option>
+              <option value="10000">10 ms</option>
+            </select>
+          </div>
         </div>
-      </div>
-      
-      <!-- Acquisition controls -->
-      <div class="form-group">
-        <label class="control-label">Acquisition:</label>
-        <div class="form-inline">
-          <button id="trigger-single" class="btn btn-primary btn-sm">Single Trigger</button>
-          <button id="trigger-continuous" class="btn btn-success btn-sm">Continuous</button>
-          <button id="trigger-stop" class="btn btn-danger btn-sm">Stop</button>
+        <div class="col-md-3">
+          <label class="control-label">Voltage/Div:</label>
+          <div class="form-inline">
+            <select id="voltage-per-div" class="form-control oscilloscope-input" data-command="setVoltagePerDiv" style="width: 100px;">
+              <option value="0.001">1 mV</option>
+              <option value="0.002" selected>2 mV</option>
+              <option value="0.005">5 mV</option>
+              <option value="0.01">10 mV</option>
+              <option value="0.02">20 mV</option>
+              <option value="0.05">50 mV</option>
+              <option value="0.1">100 mV</option>
+              <option value="0.2">200 mV</option>
+              <option value="0.5">500 mV</option>
+              <option value="1.0">1 V</option>
+            </select>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <label class="control-label">Trigger Level:</label>
+          <div class="form-inline">
+            <input type="number" 
+                   id="trigger-level" 
+                   class="form-control oscilloscope-input" 
+                   data-command="setTriggerLevel"
+                   value="0.0" 
+                   step="0.01" 
+                   min="-1.0" 
+                   max="1.0" 
+                   style="width: 80px;">
+            <span class="form-control-static">V</span>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <label class="control-label">Acquisition:</label>
+          <div class="form-inline">
+            <button id="run-stop-btn" class="btn btn-success btn-sm">Run</button>
+            <button id="single-btn" class="btn btn-primary btn-sm">Single</button>
+            <button id="auto-scale-btn" class="btn btn-info btn-sm">Auto</button>
+          </div>
         </div>
       </div>
       
@@ -43,12 +81,17 @@
       <div class="form-group">
         <label class="control-label">Status:</label>
         <div class="form-inline">
-          <span class="form-control-static">Sampling Rate: </span>
+          <span class="form-control-static">Sampling: </span>
           <span id="sampling-rate-display" class="form-control-static">250.0</span>
           <span class="form-control-static">MHz</span>
-          <span class="form-control-static" style="margin-left: 20px;">Buffer Size: </span>
+          <span class="form-control-static" style="margin-left: 15px;">Buffer: </span>
           <span id="buffer-size-display" class="form-control-static">4096</span>
           <span class="form-control-static">samples</span>
+          <span class="form-control-static" style="margin-left: 15px;">Time Span: </span>
+          <span id="time-span-display" class="form-control-static">16.4</span>
+          <span class="form-control-static">µs</span>
+          <span class="form-control-static" style="margin-left: 15px;">State: </span>
+          <span id="acquisition-state" class="form-control-static">Stopped</span>
         </div>
       </div>
       

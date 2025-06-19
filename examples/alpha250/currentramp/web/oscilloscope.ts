@@ -16,15 +16,20 @@ class Oscilloscope {
     public status: IOscilloscopeStatus;
 
     constructor(private client: Client) {
-        this.driver = this.client.getDriver('CurrentRamp');
-        this.id = this.driver.id;
-        this.cmds = this.driver.getCmds();
-
+        // Don't access driver here - wait for init()
         this.status = <IOscilloscopeStatus>{};
-        this.buffer_size = 4096;  // Default, will be updated
+        this.buffer_size = 0;  // Will be set by getBufferSize from backend
     }
 
     init(cb: () => void): void {
+        // Now access the driver after client is initialized
+        this.driver = this.client.getDriver('CurrentRamp');
+        this.id = this.driver.id;
+        this.cmds = this.driver.getCmds();
+        
+        // Debug: Log available commands
+        console.log('Available CurrentRamp commands:', Object.keys(this.cmds));
+        
         this.getBufferSize((size: number) => {
             this.buffer_size = size;
             this.getOscilloscopeParameters(() => {
@@ -34,12 +39,18 @@ class Oscilloscope {
     }
 
     getBufferSize(cb: (size: number) => void): void {
+        console.log('Calling get_adc_buffer_size...');
         this.client.readUint32(Command(this.id, this.cmds['get_adc_buffer_size']),
-                              (size) => {cb(size)});
+                              (size) => {
+                                  console.log('Buffer size received:', size);
+                                  cb(size);
+                              });
     }
 
     readAdcDataVolts(cb: (data: Float32Array) => void): void {
+        console.log('Calling get_adc_data_volts...');
         this.client.readFloat32Array(Command(this.id, this.cmds['get_adc_data_volts']), (data: Float32Array) => {
+            console.log('ADC data received, length:', data.length);
             cb(data);
         });
     }
@@ -57,16 +68,19 @@ class Oscilloscope {
     }
 
     setTimeRange(time_range_ms: number): void {
+        console.log('Setting time range to:', time_range_ms);
         this.client.send(Command(this.id, this.cmds['set_time_range'], time_range_ms));
     }
 
     getOscilloscopeParameters(cb: (status: IOscilloscopeStatus) => void): void {
-        this.client.readTuple(Command(this.id, this.cmds['get_adc_sampling_rate']), 'd',
-                              (tup: [number]) => {
-            this.status.sampling_rate = tup[0];
+        console.log('Getting oscilloscope parameters...');
+        this.client.readFloat64(Command(this.id, this.cmds['get_adc_sampling_rate']), (sampling_rate: number) => {
+            console.log('Sampling rate received:', sampling_rate);
+            this.status.sampling_rate = sampling_rate;
             this.status.buffer_size = this.buffer_size;
             
-            this.client.readFloat32(Command(this.id, this.cmds['get_time_range']), (time_range: number) => {
+            this.client.readFloat64(Command(this.id, this.cmds['get_time_range']), (time_range: number) => {
+                console.log('Time range received:', time_range);
                 this.status.time_range = time_range;
                 cb(this.status);
             });

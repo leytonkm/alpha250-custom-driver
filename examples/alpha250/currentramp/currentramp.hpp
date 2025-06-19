@@ -16,10 +16,14 @@
 #include <chrono>
 #include <thread>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 class CurrentRamp
 {
   public:
-    static constexpr uint32_t adc_buffer_size = 4096;  // ADC buffer size
+    static constexpr uint32_t adc_buffer_size = mem::adc_range/sizeof(uint32_t);  // Use actual BRAM size
 
     CurrentRamp(Context& ctx_)
     : ctx(ctx_)
@@ -29,7 +33,6 @@ class CurrentRamp
     , ctl(ctx.mm.get<mem::control>())
     , sts(ctx.mm.get<mem::status>())
     , adc_map(ctx.mm.get<mem::adc>())
-
     , dc_voltage(0.0f)
     , dc_enabled(false)
     , ramp_offset(1.5f)
@@ -43,7 +46,7 @@ class CurrentRamp
         // Initialize hardware ramp disabled
         ctl.write<reg::ramp_enable>(0);
         
-        ctx.log<INFO>("CurrentRamp: Hardware ramp generator initialized, fs_adc = %.1f MHz", fs_adc / 1e6);
+        ctx.log<INFO>("CurrentRamp initialized: fs_adc=%.0f Hz, buffer_size=%u", fs_adc, adc_buffer_size);
     }
 
     // === DC TEMPERATURE CONTROL FUNCTIONS ===
@@ -199,52 +202,44 @@ class CurrentRamp
     }
     
     // === ADC OSCILLOSCOPE FUNCTIONS ===
-    // BRAM-based ADC data acquisition for oscilloscope functionality
+    // Real ADC data acquisition using BRAM
     
     void trigger_adc_acquisition() {
-        // Trigger ADC data acquisition into BRAM
-        ctl.set_bit<reg::adc_trig, 0>();
-        ctl.clear_bit<reg::adc_trig, 0>();
+        ctx.log<INFO>("Triggering ADC acquisition...");
+        ctl.set_bit<reg::trig, 0>();
+        ctl.clear_bit<reg::trig, 0>();
     }
     
-    std::array<int16_t, adc_buffer_size> get_adc_data() {
-        // Read ADC data from BRAM (similar to adc-dac-bram example)
-        // The BRAM stores 32-bit words containing both ADC channels
-        auto raw_data = adc_map.read_array<uint32_t, adc_buffer_size>();
-        
-        std::array<int16_t, adc_buffer_size> adc_channel_0;
-        
-        // Extract channel 0 (lower 16 bits) from each 32-bit word
-        for (size_t i = 0; i < adc_buffer_size; i++) {
-            adc_channel_0[i] = static_cast<int16_t>(raw_data[i] & 0xFFFF);
-        }
-        
-        return adc_channel_0;
+    std::array<uint32_t, adc_buffer_size> get_adc_data() {
+        trigger_adc_acquisition();
+        ctx.log<INFO>("Reading ADC data from BRAM, buffer_size=%u", adc_buffer_size);
+        return adc_map.read_array<uint32_t, adc_buffer_size>();
     }
     
     std::array<float, adc_buffer_size> get_adc_data_volts() {
+        ctx.log<INFO>("get_adc_data_volts called, buffer_size=%u", adc_buffer_size);
+        
+        // Get raw ADC data
         auto raw_data = get_adc_data();
+        
+        // Get calibration parameters for channel 0
+        float gain = ltc2157.get_gain(0);  // LSB per Volt
+        float offset = ltc2157.get_offset(0);  // LSB offset
+        
+        // Convert to voltages using LTC2157 calibration
         std::array<float, adc_buffer_size> voltage_data;
-        
-        // Use proper LTC2157 calibration (similar to FFT example)
-        // Get calibrated gain and offset for channel 0
-        float gain = ltc2157.get_gain(0);
-        float offset = ltc2157.get_offset(0);
-        float vin_range = ltc2157.get_input_voltage_range(0);
-        
-        ctx.log<INFO>("ADC calibration: gain=%.3f, offset=%.3f, vin_range=%.3f", 
-                      static_cast<double>(gain), static_cast<double>(offset), static_cast<double>(vin_range));
-        
         for (size_t i = 0; i < adc_buffer_size; i++) {
-            int16_t adc_code = raw_data[i];
+            // Use channel 0 data (extract from 32-bit word)
+            uint16_t adc_value = static_cast<uint16_t>(raw_data[i] & 0xFFFF);
             
-            // Apply calibration: (ADC_code - offset) / gain = voltage
-            if (std::abs(gain) > std::numeric_limits<float>::epsilon()) {
-                voltage_data[i] = (static_cast<float>(adc_code) - offset) / gain;
-            } else {
-                voltage_data[i] = 0.0f; // Fallback if gain is invalid
-            }
+            // Convert to signed 16-bit value
+            int16_t signed_adc = static_cast<int16_t>(adc_value);
+            
+            // Apply calibration: voltage = (adc_value - offset) / gain
+            voltage_data[i] = (static_cast<float>(signed_adc) - offset) / gain;
         }
+        
+        ctx.log<INFO>("Converted ADC data to voltages: %u samples", adc_buffer_size);
         return voltage_data;
     }
     
@@ -373,7 +368,6 @@ class CurrentRamp
     Memory<mem::control>& ctl;
     Memory<mem::status>& sts;
     Memory<mem::adc>& adc_map;
-
     
     // Clock and timing
     double fs_adc;  // ADC sampling frequency

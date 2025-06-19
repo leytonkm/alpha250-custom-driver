@@ -1,4 +1,4 @@
-source ${board_path}/starting_point.tcl
+ source ${board_path}/starting_point.tcl
 
 ####################################
 # Hardware Ramp Generation
@@ -70,13 +70,6 @@ cell xilinx.com:ip:c_addsub:12.0 ramp_offset_add {
   B [ctl_pin ramp_offset_reg]
 }
 
-# Ramp output connection temporarily disabled
-# TODO: Implement proper ramp output control
-
-# Simplified precision DAC connection
-# Connect ramp directly to precision DAC channel 2
-# TODO: Add proper concatenation when mux is working
-
 # Status outputs - connect phase accumulator to status register
 connect_pins [sts_pin ramp_phase] ramp_timer/m_axis_phase_tdata
 
@@ -102,32 +95,5 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
-####################################
-# ADC Oscilloscope (BRAM-based data acquisition)
-####################################
-
-# Add BRAM for ADC data storage
-# "adc" BRAM range and offset are defined in the "memory" part of config.yml
-source $sdk_path/fpga/lib/bram.tcl
-add_bram adc
-
-# Add a counter for BRAM addressing (using the same counter from adc-dac-bram example)
-cell koheron:user:address_counter:1.0 address_counter {
-  COUNT_WIDTH [get_memory_addr_width adc]
-} {
-  clken [get_constant_pin 1 1]
-  clk adc_dac/adc_clk
-  trig [get_slice_pin [ctl_pin adc_trig] 0 0]
-}
-
-# Connect ADC BRAM
-connect_cell blk_mem_gen_adc {
-  addrb address_counter/address
-  clkb adc_dac/adc_clk
-  dinb [get_concat_pin [list adc_dac/adc0 adc_dac/adc1]]
-  enb [get_constant_pin 1 1]
-  rstb [get_constant_pin 0 1]
-  web address_counter/wen
-}
-
-# Note: Test signals removed for initial build - can be added back later 
+# TODO: Connect ramp output to precision DAC channel 2
+# For now, just hardware ramp generation without output connection 

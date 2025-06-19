@@ -7,27 +7,37 @@ class VoltageControl {
     private cmds: Commands;
 
     constructor(private client: Client) {
-        this.driver = this.client.getDriver('CurrentRamp');
-        this.id = this.driver.id;
-        this.cmds = this.driver.getCmds();
-        
-        // Debug: Log available commands
-        console.log('Available CurrentRamp commands:', Object.keys(this.cmds));
+        // Don't access driver here - client might not be ready yet
+        // Driver access moved to first method call with lazy initialization
+    }
+
+    private ensureDriverReady(): void {
+        if (!this.driver) {
+            this.driver = this.client.getDriver('CurrentRamp');
+            this.id = this.driver.id;
+            this.cmds = this.driver.getCmds();
+            
+            // Debug: Log available commands
+            console.log('Available CurrentRamp commands:', Object.keys(this.cmds));
+        }
     }
 
     // === DC Temperature Control Functions ===
     
     setTemperatureDcVoltage(voltage: number): void {
+        this.ensureDriverReady();
         console.log('Setting DC voltage to:', voltage);
         this.client.send(Command(this.id, this.cmds['set_temperature_dc_voltage'], voltage));
     }
 
     enableTemperatureDcOutput(enable: boolean): void {
+        this.ensureDriverReady();
         console.log('Enabling DC output:', enable);
         this.client.send(Command(this.id, this.cmds['enable_temperature_dc_output'], enable));
     }
 
     getTemperatureDcVoltage(callback: (voltage: number) => void): void {
+        this.ensureDriverReady();
         this.client.readFloat32(Command(this.id, this.cmds['get_temperature_dc_voltage']), (voltage) => {
             console.log('Read DC voltage:', voltage);
             callback(voltage);
@@ -35,6 +45,7 @@ class VoltageControl {
     }
 
     getTemperatureDcEnabled(callback: (enabled: boolean) => void): void {
+        this.ensureDriverReady();
         this.client.readBool(Command(this.id, this.cmds['get_temperature_dc_enabled']), (enabled) => {
             console.log('Read DC enabled:', enabled);
             callback(enabled);
@@ -44,34 +55,42 @@ class VoltageControl {
     // === Current Ramp Control Functions ===
     
     setRampOffset(offset: number): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['set_ramp_offset'], offset));
     }
 
     setRampAmplitude(amplitude: number): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['set_ramp_amplitude'], amplitude));
     }
 
     setRampFrequency(frequency: number): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['set_ramp_frequency'], frequency));
     }
 
     startRamp(): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['start_ramp']));
     }
 
     stopRamp(): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['stop_ramp']));
     }
 
     generateRampWaveform(): void {
+        this.ensureDriverReady();
         this.client.send(Command(this.id, this.cmds['generate_ramp_waveform']));
     }
 
     getRampOffset(callback: (offset: number) => void): void {
+        this.ensureDriverReady();
         this.client.readFloat32(Command(this.id, this.cmds['get_ramp_offset']), callback);
     }
 
     getRampAmplitude(callback: (amplitude: number) => void): void {
+        this.ensureDriverReady();
         this.client.readFloat32(Command(this.id, this.cmds['get_ramp_amplitude']), callback);
     }
 

@@ -27,13 +27,22 @@ class App {
                     this.oscilloscope = new Oscilloscope(client);
                     console.log('Oscilloscope created successfully');
                     
-                    console.log('Creating OscilloscopePlot...');
-                    this.oscilloscopePlot = new OscilloscopePlot(this.oscilloscope);
-                    console.log('OscilloscopePlot created successfully');
-                    
-                    console.log('Creating OscilloscopeApp...');
-                    this.oscilloscopeApp = new OscilloscopeApp(document, this.oscilloscope);
-                    console.log('OscilloscopeApp created successfully');
+                    // Initialize the oscilloscope driver
+                    this.oscilloscope.init(() => {
+                        console.log('Oscilloscope initialized successfully');
+                        
+                        console.log('Creating OscilloscopeApp...');
+                        this.oscilloscopeApp = new OscilloscopeApp(document, this.oscilloscope);
+                        console.log('OscilloscopeApp created successfully');
+                        
+                        console.log('Creating OscilloscopePlot...');
+                        this.oscilloscopePlot = new OscilloscopePlot(this.oscilloscope, this.oscilloscopeApp);
+                        console.log('OscilloscopePlot created successfully');
+                        
+                        // Connect the app and plot
+                        this.oscilloscopeApp.setPlotReference(this.oscilloscopePlot);
+                        console.log('Connected app and plot');
+                    });
                 } catch (error) {
                     console.error('Error initializing oscilloscope:', error);
                 }
