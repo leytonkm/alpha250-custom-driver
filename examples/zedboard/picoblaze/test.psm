@@ -1,4 +1,0 @@
-
-input s0, 0
-add s0, 63
-output s0, 0
