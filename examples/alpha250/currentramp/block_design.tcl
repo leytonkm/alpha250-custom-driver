@@ -124,4 +124,7 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
-# Note: Test signals removed for initial build - can be added back later 
+# Simple ADC streaming placeholders (minimal for now)
+# Connect ADC channels to status registers for monitoring
+connect_pins [sts_pin adc_channel_data] adc_dac/adc0
+connect_pins [sts_pin decimated_rate] [get_constant_pin 100000 32] 

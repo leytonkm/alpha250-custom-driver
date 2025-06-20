@@ -2,14 +2,16 @@
 ///
 /// Driver for controlling laser current ramp (temperature and laser power)
 /// Hardware-based precise timing using DDS phase accumulator
+/// Added: Long-duration ADC streaming for monitoring ramp response
 /// (c) Koheron
 
-#ifndef __DRIVERS_CURRENT_RAMP_HPP__
-#define __DRIVERS_CURRENT_RAMP_HPP__
+#ifndef __DRIVERS_CURRENTRAMP_HPP__
+#define __DRIVERS_CURRENTRAMP_HPP__
 
 #include <context.hpp>
 #include <boards/alpha250/drivers/precision-dac.hpp>
 #include <boards/alpha250/drivers/clock-generator.hpp>
+#include <boards/alpha250/drivers/ltc2157.hpp>
 #include <array>
 #include <cmath>
 
@@ -20,6 +22,7 @@ class CurrentRamp
     : ctx(ctx_)
     , precision_dac(ctx.get<PrecisionDac>())
     , clk_gen(ctx.get<ClockGenerator>())
+    , ltc2157(ctx.get<Ltc2157>())
     , ctl(ctx.mm.get<mem::control>())
     , sts(ctx.mm.get<mem::status>())
     , dc_voltage(0.0f)
@@ -36,6 +39,10 @@ class CurrentRamp
         ctl.write<reg::ramp_enable>(0);
         
         ctx.log<INFO>("CurrentRamp: Hardware ramp generator initialized, fs_adc = %.1f MHz", fs_adc / 1e6);
+    }
+
+    ~CurrentRamp() {
+        // Cleanup if needed
     }
 
     // === DC TEMPERATURE CONTROL FUNCTIONS ===
@@ -210,8 +217,8 @@ class CurrentRamp
     bool get_ramp_enabled() {
         return hardware_ramp_enabled;
     }
-    
-    // === HARDWARE STATUS FUNCTIONS ===
+
+    // === STATUS AND MONITORING ===
     
     uint32_t get_ramp_phase() {
         return sts.read<reg::ramp_phase>();
@@ -221,73 +228,98 @@ class CurrentRamp
         return sts.read<reg::cycle_count>();
     }
     
-    // Get current ramp output normalized to 0-1 range
+    // Calculate ramp position from phase accumulator (0.0 to 1.0)
     float get_ramp_position() {
         uint32_t phase = get_ramp_phase();
         return static_cast<float>(phase) / static_cast<float>(0xFFFFFFFF);
     }
 
-    // === MANUAL TESTING FUNCTIONS ===
+    // === TEST FUNCTIONS ===
+    // For precision DAC testing - direct voltage control on all channels
     
     void set_test_voltage_channel_0(float voltage) {
-        if (voltage >= 0.0f && voltage <= 2.5f) {
-            precision_dac.set_dac_value_volts(0, voltage);
-            ctx.log<INFO>("Test voltage set on Channel 0: %.3f V", static_cast<double>(voltage));
-        } else {
-            ctx.log<ERROR>("Invalid test voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
+        if (voltage < 0.0f || voltage > 2.5f) {
+            ctx.log<ERROR>("Invalid voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
+            return;
         }
+        precision_dac.set_dac_value_volts(0, voltage);
+        ctx.log<INFO>("Test voltage channel 0: %.3f V", static_cast<double>(voltage));
     }
-
+    
     void set_test_voltage_channel_1(float voltage) {
-        // Note: This will conflict with hardware ramp if enabled
-        if (hardware_ramp_enabled) {
-            ctx.log<WARNING>("Hardware ramp is enabled - manual voltage may be overridden");
+        if (voltage < 0.0f || voltage > 2.5f) {
+            ctx.log<ERROR>("Invalid voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
+            return;
         }
-        
-        if (voltage >= 0.0f && voltage <= 2.5f) {
-            precision_dac.set_dac_value_volts(1, voltage);
-            ctx.log<INFO>("Test voltage set on Channel 1: %.3f V", static_cast<double>(voltage));
-        } else {
-            ctx.log<ERROR>("Invalid test voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
-        }
+        precision_dac.set_dac_value_volts(1, voltage);
+        ctx.log<INFO>("Test voltage channel 1: %.3f V", static_cast<double>(voltage));
     }
-
+    
+    // Channel 2 is used by hardware ramp
     void set_test_voltage_channel_2(float voltage) {
-        // Note: This will conflict with hardware ramp if enabled
-        if (hardware_ramp_enabled) {
-            ctx.log<WARNING>("Hardware ramp is enabled - manual voltage may be overridden");
+        if (voltage < 0.0f || voltage > 2.5f) {
+            ctx.log<ERROR>("Invalid voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
+            return;
         }
         
-        if (voltage >= 0.0f && voltage <= 2.5f) {
-            precision_dac.set_dac_value_volts(2, voltage);
-            ctx.log<INFO>("Test voltage set on Channel 2: %.3f V", static_cast<double>(voltage));
-        } else {
-            ctx.log<ERROR>("Invalid test voltage: %.3f V (must be 0-2.5V)", static_cast<double>(voltage));
+        if (hardware_ramp_enabled) {
+            ctx.log<WARNING>("Hardware ramp is active - stopping ramp to set manual voltage");
+            stop_ramp();
         }
+        
+        precision_dac.set_dac_value_volts(2, voltage);
+        ctx.log<INFO>("Test voltage channel 2: %.3f V (hardware ramp disabled)", static_cast<double>(voltage));
     }
 
-    // === STATUS FUNCTIONS ===
+    // === ADC READING FUNCTIONS ===
     
     float get_photodiode_reading() {
-        // This would read from ADC - placeholder for now
-        return 0.0f;
+        uint32_t adc_raw = sts.read<reg::adc0>();
+        return adc_to_voltage(adc_raw);
     }
     
-    // Get hardware timing diagnostics
     auto get_timing_status() {
         return std::make_tuple(
-            fs_adc,
+            get_ramp_enabled(),
+            get_ramp_frequency(),
             get_ramp_phase(),
-            get_cycle_count(), 
-            get_ramp_position(),
-            hardware_ramp_enabled
+            get_cycle_count(),
+            get_ramp_position()
         );
+    }
+
+    // Raw ADC access
+    uint32_t get_adc0() {
+        return sts.read<reg::adc0>();
+    }
+    
+    uint32_t get_adc1() {
+        return sts.read<reg::adc1>();
+    }
+    
+    std::array<uint32_t, 2> get_adc_both() {
+        return {{get_adc0(), get_adc1()}};
+    }
+    
+    float adc_to_voltage(uint32_t adc_raw) {
+        // Convert 16-bit ADC to voltage (±1.8V range)
+        int16_t signed_adc = static_cast<int16_t>(adc_raw & 0xFFFF);
+        return (static_cast<float>(signed_adc) / 32768.0f) * 1.8f;
+    }
+    
+    float get_adc0_voltage() {
+        return adc_to_voltage(get_adc0());
+    }
+    
+    float get_adc1_voltage() {
+        return adc_to_voltage(get_adc1());
     }
 
   private:
     Context& ctx;
     PrecisionDac& precision_dac;
     ClockGenerator& clk_gen;
+    Ltc2157& ltc2157;
     Memory<mem::control>& ctl;
     Memory<mem::status>& sts;
     
@@ -305,4 +337,4 @@ class CurrentRamp
     bool hardware_ramp_enabled;
 };
 
-#endif // __DRIVERS_CURRENT_RAMP_HPP__ 
+#endif // __DRIVERS_CURRENTRAMP_HPP__ 

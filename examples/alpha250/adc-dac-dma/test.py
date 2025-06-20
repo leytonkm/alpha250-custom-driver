@@ -47,7 +47,7 @@ class AdcDacDma(object):
         self.adc[1::2] = (np.int32(data >> 16) - 32768) % 65536 - 32768
 
 if __name__=="__main__":
-    host = os.getenv('HOST','192.168.1.16')
+    host = os.getenv('HOST','192.168.1.20')
     client = connect(host, name='adc-dac-dma')
     driver = AdcDacDma(client)
 

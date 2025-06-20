@@ -36,16 +36,6 @@ memory:
   - name: xadc
     offset: '0x43C00000'
     range: 64K
-  # Hardware ramp data buffer
-  - name: ramp_data
-    range: 4K
-    offset: '0x40000000'
-  - name: adc
-    range: 256K
-    offset: '0x40001000'
-  - name: dac
-    range: 256K
-    offset: '0x40041000'
 
 control_registers:
   # MMCM control
@@ -67,6 +57,9 @@ status_registers:
   - system_status       # Error flags, overflows, etc.
   - ramp_phase          # Current ramp phase for monitoring
   - cycle_count         # Number of completed ramp cycles
+  # Simple ADC monitoring
+  - adc_channel_data    # Selected ADC channel data
+  - decimated_rate      # Decimated sample rate
 
 ps_control_registers:
   - spi_cfg_data
