@@ -18,8 +18,8 @@ cell xilinx.com:ip:dds_compiler:6.0 ramp_timer {
   aclk adc_dac/adc_clk
 }
 
-# Phase increment control for ramp frequency
-cell pavel-demin:user:axis_constant:1.0 ramp_phase_increment {
+# Phase increment control for ramp frequency - use axis_variable for proper AXI interface
+cell pavel-demin:user:axis_variable:1.0 ramp_phase_increment {
   AXIS_TDATA_WIDTH [get_parameter ramp_phase_width]
 } {
   cfg_data [ctl_pin ramp_freq_incr]
@@ -124,7 +124,171 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
-# Simple ADC streaming placeholders (minimal for now)
-# Connect ADC channels to status registers for monitoring
-connect_pins [sts_pin adc_channel_data] adc_dac/adc0
-connect_pins [sts_pin decimated_rate] [get_constant_pin 100000 32] 
+####################################
+# DMA Infrastructure (following adc-dac-dma example exactly)
+####################################
+
+# Configure Zynq Processing System for DMA
+set_cell_props ps_0 {
+  PCW_USE_S_AXI_HP0 1
+  PCW_S_AXI_HP0_DATA_WIDTH 64
+  PCW_USE_S_AXI_HP2 1
+  PCW_S_AXI_HP2_DATA_WIDTH 64
+  PCW_USE_HIGH_OCM 1
+  PCW_USE_S_AXI_GP0 1
+}
+
+connect_pins ps_0/S_AXI_GP0_ACLK ps_0/FCLK_CLK0
+connect_pins ps_0/S_AXI_HP0_ACLK ps_0/FCLK_CLK0
+connect_pins ps_0/S_AXI_HP2_ACLK ps_0/FCLK_CLK0
+
+# Create DMA interconnect first, then connect
+cell xilinx.com:ip:axi_interconnect:2.1 dma_interconnect {
+  NUM_SI 2
+  NUM_MI 3
+  S01_HAS_REGSLICE 1
+} {
+  ACLK ps_0/FCLK_CLK0
+  ARESETN proc_sys_reset_0/peripheral_aresetn
+  M00_AXI ps_0/S_AXI_GP0
+  M01_AXI ps_0/S_AXI_HP0
+  M02_AXI ps_0/S_AXI_HP2
+  S00_ACLK ps_0/FCLK_CLK0
+  S00_ARESETN proc_sys_reset_0/peripheral_aresetn
+  S01_ACLK ps_0/FCLK_CLK0
+  S01_ARESETN proc_sys_reset_0/peripheral_aresetn
+  M00_ACLK ps_0/FCLK_CLK0
+  M00_ARESETN proc_sys_reset_0/peripheral_aresetn
+  M01_ACLK ps_0/FCLK_CLK0
+  M01_ARESETN proc_sys_reset_0/peripheral_aresetn
+  M02_ACLK ps_0/FCLK_CLK0
+  M02_ARESETN proc_sys_reset_0/peripheral_aresetn
+}
+
+####################################
+# ADC Streaming Pipeline with CIC Decimation
+####################################
+
+# ADC channel multiplexer
+cell koheron:user:bus_multiplexer:1.0 adc_mux {
+  WIDTH 16
+} {
+  din0 adc_dac/adc0
+  din1 adc_dac/adc1
+  sel [get_slice_pin [ctl_pin channel_select] 0 0]
+}
+
+# CIC Decimation Filter (following phase-noise-analyzer example)
+set diff_delay [get_parameter cic_differential_delay]
+set dec_rate_default [get_parameter cic_decimation_rate_default]
+set dec_rate_min [get_parameter cic_decimation_rate_min]
+set dec_rate_max [get_parameter cic_decimation_rate_max]
+set n_stages [get_parameter cic_n_stages]
+
+cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
+  Filter_Type Decimation
+  Number_Of_Stages $n_stages
+  Fixed_Or_Initial_Rate $dec_rate_default
+  Sample_Rate_Changes Programmable
+  Minimum_Rate $dec_rate_min
+  Maximum_Rate $dec_rate_max
+  Differential_Delay $diff_delay
+  Input_Sample_Frequency [expr [get_parameter adc_clk] / 1000000.]
+  Clock_Frequency [expr [get_parameter adc_clk] / 1000000.]
+  Input_Data_Width 16
+  Quantization Truncation
+  Output_Data_Width 32
+  Use_Xtreme_DSP_Slice false
+  HAS_DOUT_TREADY true
+} {
+  aclk adc_dac/adc_clk
+  s_axis_data_tdata adc_mux/dout
+  s_axis_data_tvalid [get_constant_pin 1 1]
+}
+
+# CIC rate control
+cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
+  AXIS_TDATA_WIDTH 16
+} {
+  cfg_data [ctl_pin cic_rate]
+  aclk adc_dac/adc_clk
+  aresetn rst_adc_clk/peripheral_aresetn
+  M_AXIS cic_decimator/S_AXIS_CONFIG
+}
+
+# Width converter: 32-bit CIC output to 64-bit for DMA efficiency
+cell xilinx.com:ip:axis_dwidth_converter:1.1 axis_dwidth_converter_0 {
+  S_TDATA_NUM_BYTES 4
+  M_TDATA_NUM_BYTES 8
+} {
+  aclk adc_dac/adc_clk
+  aresetn rst_adc_clk/peripheral_aresetn
+  S_AXIS cic_decimator/M_AXIS_DATA
+}
+
+# Clock domain crossing: ADC clock to fabric clock
+cell xilinx.com:ip:axis_clock_converter:1.1 axis_clock_converter_0 {
+  TDATA_NUM_BYTES 8
+} {
+  s_axis_aclk adc_dac/adc_clk
+  s_axis_aresetn rst_adc_clk/peripheral_aresetn
+  m_axis_aclk ps_0/FCLK_CLK0
+  m_axis_aresetn proc_sys_reset_0/peripheral_aresetn
+  S_AXIS axis_dwidth_converter_0/M_AXIS
+}
+
+# Packet generator for DMA transfers
+cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
+  TDATA_WIDTH 64
+  PKT_LENGTH [expr 64 * 1024]
+} {
+  aclk ps_0/FCLK_CLK0
+  resetn proc_sys_reset_0/peripheral_aresetn
+  s_axis axis_clock_converter_0/M_AXIS
+}
+
+####################################
+# AXI DMA (S2MM only - no MM2S needed)
+####################################
+
+cell xilinx.com:ip:axi_dma:7.1 axi_dma_0 {
+  c_include_sg 1
+  c_sg_include_stscntrl_strm 0
+  c_sg_length_width 20
+  c_s2mm_burst_size 16
+  c_m_axi_s2mm_data_width 64
+  c_include_mm2s 0
+} {
+  S_AXI_LITE axi_mem_intercon_0/M[add_master_interface]_AXI
+  s_axi_lite_aclk ps_0/FCLK_CLK0
+  M_AXI_SG dma_interconnect/S00_AXI
+  m_axi_sg_aclk ps_0/FCLK_CLK0
+  M_AXI_S2MM dma_interconnect/S01_AXI
+  m_axi_s2mm_aclk ps_0/FCLK_CLK0
+  S_AXIS_S2MM tlast_gen_0/m_axis
+  axi_resetn proc_sys_reset_0/peripheral_aresetn
+  s2mm_introut [get_interrupt_pin]
+}
+
+# DMA AXI Lite address assignment
+assign_bd_address [get_bd_addr_segs {axi_dma_0/S_AXI_LITE/Reg }]
+set_property range [get_memory_range dma] [get_bd_addr_segs {ps_0/Data/SEG_axi_dma_0_Reg}]
+set_property offset [get_memory_offset dma] [get_bd_addr_segs {ps_0/Data/SEG_axi_dma_0_Reg}]
+
+# Scatter Gather interface in On Chip Memory (use GP0 HIGH_OCM like adc-dac-dma)
+assign_bd_address [get_bd_addr_segs {ps_0/S_AXI_GP0/GP0_HIGH_OCM }]
+set_property range 64K [get_bd_addr_segs {axi_dma_0/Data_SG/SEG_ps_0_GP0_HIGH_OCM}]
+set_property offset [get_memory_offset ocm_s2mm] [get_bd_addr_segs {axi_dma_0/Data_SG/SEG_ps_0_GP0_HIGH_OCM}]
+
+# S2MM interface in DDR (use HP2 like adc-dac-dma)
+assign_bd_address [get_bd_addr_segs {ps_0/S_AXI_HP2/HP2_DDR_LOWOCM }]
+set_property range [get_memory_range ram_s2mm] [get_bd_addr_segs {axi_dma_0/Data_S2MM/SEG_ps_0_HP2_DDR_LOWOCM}]
+set_property offset [get_memory_offset ram_s2mm] [get_bd_addr_segs {axi_dma_0/Data_S2MM/SEG_ps_0_HP2_DDR_LOWOCM}]
+
+# Unmap unused segments to avoid conflicts
+delete_bd_objs [get_bd_addr_segs axi_dma_0/Data_SG/SEG_ps_0_HP0_DDR_LOWOCM]
+delete_bd_objs [get_bd_addr_segs axi_dma_0/Data_SG/SEG_ps_0_HP2_DDR_LOWOCM]
+delete_bd_objs [get_bd_addr_segs axi_dma_0/Data_S2MM/SEG_ps_0_GP0_HIGH_OCM]
+delete_bd_objs [get_bd_addr_segs axi_dma_0/Data_S2MM/SEG_ps_0_HP0_DDR_LOWOCM]
+
+# Validate design 
