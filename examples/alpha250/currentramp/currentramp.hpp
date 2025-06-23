@@ -61,6 +61,7 @@ class CurrentRamp
     , axi_hp0(ctx.mm.get<mem::axi_hp0>())
     , axi_hp2(ctx.mm.get<mem::axi_hp2>())
     , ocm_s2mm(ctx.mm.get<mem::ocm_s2mm>())
+    , ocm_mm2s(ctx.mm.get<mem::ocm_mm2s>())
     , sclr(ctx.mm.get<mem::sclr>())
     , dc_voltage(0.0f)
     , dc_enabled(false)
@@ -329,13 +330,13 @@ class CurrentRamp
         set_descriptors();
         
         // Write address of the starting descriptor
-        dma.write<Dma_regs::s2mm_curdesc>(mem::ocm_s2mm_addr + 0x0);
+        dma.write<Dma_regs::s2mm_curdesc>(mem::ocm_mm2s_addr + 0x0);
         
         // Start S2MM channel
         dma.set_bit<Dma_regs::s2mm_dmacr, 0>();
         
         // Write address of the tail descriptor (this starts the transfer)
-        dma.write<Dma_regs::s2mm_taildesc>(mem::ocm_s2mm_addr + (n_desc-1) * 0x40);
+        dma.write<Dma_regs::s2mm_taildesc>(mem::ocm_mm2s_addr + (n_desc-1) * 0x40);
         
         streaming_active = true;
         ctx.log<INFO>("DMA streaming started with %u descriptors", n_desc);
@@ -349,7 +350,7 @@ class CurrentRamp
         
         // Stop S2MM channel
         dma.clear_bit<Dma_regs::s2mm_dmacr, 0>();
-        dma.write<Dma_regs::s2mm_taildesc>(mem::ocm_s2mm_addr + (n_desc-1) * 0x40);
+        dma.write<Dma_regs::s2mm_taildesc>(mem::ocm_mm2s_addr + (n_desc-1) * 0x40);
         
         streaming_active = false;
         ctx.log<INFO>("DMA streaming stopped");
@@ -359,18 +360,39 @@ class CurrentRamp
         return streaming_active;
     }
     
+    // Alternative function names for compatibility
+    void start_adc_streaming() {
+        start_streaming();
+    }
+    
+    void stop_adc_streaming() {
+        stop_streaming();
+    }
+    
+    bool is_adc_streaming_active() {
+        return get_streaming_active();
+    }
+    
+    void set_cic_decimation_rate(uint32_t rate) {
+        set_decimation_rate(rate);
+    }
+    
+    uint32_t get_cic_decimation_rate() {
+        return get_decimation_rate();
+    }
+    
     uint32_t get_samples_captured() {
         if (!streaming_active) return 0;
         
         // For continuous DMA operation, we should return the buffer fill level
         // not a cumulative count that overflows
         uint32_t current_desc_addr = dma.read<Dma_regs::s2mm_curdesc>();
-        if (current_desc_addr < mem::ocm_s2mm_addr) {
+        if (current_desc_addr < mem::ocm_mm2s_addr) {
             ctx.log<WARNING>("Invalid descriptor address: 0x%08x", current_desc_addr);
             return 0;
         }
         
-        uint32_t desc_offset = current_desc_addr - mem::ocm_s2mm_addr;
+        uint32_t desc_offset = current_desc_addr - mem::ocm_mm2s_addr;
         uint32_t current_desc = desc_offset / 0x40;
         
         // Ensure descriptor index is in valid range
@@ -398,36 +420,72 @@ class CurrentRamp
         return dma.read<Dma_regs::s2mm_curdesc>();
     }
     
-    // Fixed: Use the correct array reading pattern from adc-dac-dma
-    auto& get_adc_stream_data() {
-        adc_data = ram_s2mm.read_array<uint32_t, n_desc * n_pts>();
-        return adc_data;
+    // === ADVANCED DMA DIAGNOSTICS ===
+    
+    uint32_t get_dma_status_register() {
+        return dma.read<Dma_regs::s2mm_dmasr>();
     }
     
-    // Convert raw data to voltages - return array reference for recv_array compatibility
-    auto& get_adc_stream_voltages(uint32_t num_samples) {
-        if (num_samples > n_desc * n_pts) {
-            num_samples = n_desc * n_pts;
-            ctx.log<WARNING>("Requested samples exceeds buffer size, limiting to %u", num_samples);
+    uint32_t get_current_descriptor_index() {
+        uint32_t current_desc_addr = dma.read<Dma_regs::s2mm_curdesc>();
+        
+        // Validate descriptor address
+        if (current_desc_addr == 0 || current_desc_addr < mem::ocm_mm2s_addr) {
+            ctx.log<WARNING>("Invalid descriptor address: 0x%08x", current_desc_addr);
+            return 0;
         }
         
-        // Get raw data using the working pattern
-        auto& raw_data = get_adc_stream_data();
+        uint32_t desc_offset = current_desc_addr - mem::ocm_mm2s_addr;
+        uint32_t desc_idx = (desc_offset / 0x40) % n_desc;
         
-        // Convert to voltages in the voltage_data array
-        for (uint32_t i = 0; i < num_samples; i++) {
-            // Extract 16-bit ADC value from 32-bit word (lower 16 bits)
-            uint16_t adc_raw = static_cast<uint16_t>(raw_data[i] & 0xFFFF);
-            
-            // Convert to signed and then to voltage (±1.8V range)
-            int16_t adc_signed = static_cast<int16_t>(adc_raw);
-            float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 1.8f;
-            
-            voltage_data[i] = voltage;
+        // Additional validation
+        if (desc_idx >= n_desc) {
+            ctx.log<WARNING>("Descriptor index out of range: %u (max %u)", desc_idx, n_desc - 1);
+            return 0;
         }
         
-        ctx.log<INFO>("Retrieved %u voltage samples from DMA buffer", num_samples);
-        return voltage_data;
+        return desc_idx;
+    }
+    
+    uint32_t get_buffer_position() {
+        uint32_t desc_idx = get_current_descriptor_index();
+        return desc_idx * n_pts;
+    }
+    
+    bool get_dma_running() {
+        uint32_t status_reg = get_dma_status_register();
+        return (status_reg & 0x1) != 0;  // RS bit
+    }
+    
+    bool get_dma_idle() {
+        uint32_t status_reg = get_dma_status_register();
+        return (status_reg & 0x2) != 0;  // Idle bit
+    }
+    
+    bool get_dma_error() {
+        uint32_t status_reg = get_dma_status_register();
+        return (status_reg & 0x70) != 0;  // Error bits
+    }
+    
+    // Improved sample counting with wraparound handling
+    uint32_t get_samples_captured_accurate() {
+        // For circular buffer, we can't count total samples easily
+        // Instead, return current buffer fill level
+        return get_buffer_position();
+    }
+    
+    // Get current buffer fill percentage
+    float get_buffer_fill_percentage() {
+        uint32_t total_buffer_size = n_desc * n_pts;
+        uint32_t current_fill = get_samples_captured_accurate();
+        return (static_cast<float>(current_fill) / static_cast<float>(total_buffer_size)) * 100.0f;
+    }
+    
+    // Check if DMA is healthy
+    bool is_dma_healthy() {
+        // DMA is healthy if no errors, regardless of running state
+        // (DMA may pause between descriptor fills but still be healthy)
+        return !get_dma_error() && streaming_active;
     }
 
     // === TEST FUNCTIONS ===
@@ -511,6 +569,85 @@ class CurrentRamp
         return adc_to_voltage(get_adc1());
     }
 
+    // === DATA RETRIEVAL FUNCTIONS ===
+    
+    // Fixed: Use the correct array reading pattern from adc-dac-dma
+    auto& get_adc_stream_data() {
+        adc_data = ram_s2mm.read_array<uint32_t, n_desc * n_pts>();
+        return adc_data;
+    }
+    
+    // Convert raw data to voltages - return array reference for recv_array compatibility
+    auto& get_adc_stream_voltages(uint32_t num_samples) {
+        if (num_samples > n_desc * n_pts) {
+            num_samples = n_desc * n_pts;
+            ctx.log<WARNING>("Requested samples exceeds buffer size, limiting to %u", num_samples);
+        }
+        
+        // Get raw data using the working pattern
+        auto& raw_data = get_adc_stream_data();
+        
+        // Convert to voltages in the voltage_data array
+        for (uint32_t i = 0; i < num_samples; i++) {
+            // Extract 16-bit ADC value from 32-bit word (lower 16 bits)
+            uint16_t adc_raw = static_cast<uint16_t>(raw_data[i] & 0xFFFF);
+            
+            // Convert to signed and then to voltage (±1.8V range)
+            int16_t adc_signed = static_cast<int16_t>(adc_raw);
+            float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 1.8f;
+            
+            voltage_data[i] = voltage;
+        }
+        
+        ctx.log<INFO>("Retrieved %u voltage samples from DMA buffer", num_samples);
+        return voltage_data;
+    }
+    
+    // OPTIMIZED: Fast retrieval for small sample counts
+    // Returns a vector with only the requested samples
+    std::vector<float> get_adc_stream_voltages_fast(uint32_t num_samples) {
+        if (num_samples > n_desc * n_pts) {
+            num_samples = n_desc * n_pts;
+            ctx.log<WARNING>("Requested samples exceeds buffer size, limiting to %u", num_samples);
+        }
+        
+        std::vector<float> result(num_samples);
+        
+        // For small requests, read only what we need directly from memory
+        if (num_samples <= 65536) {  // Less than 64K samples - read directly
+            ctx.log<INFO>("Fast path: reading %u samples directly from DMA buffer", num_samples);
+            
+            // Read from the same buffer position as the slow method (start of buffer)
+            uint32_t buffer_start_addr = 0;  // Start from beginning like slow method
+            
+            // Read only the requested samples directly
+            for (uint32_t i = 0; i < num_samples; i++) {
+                uint32_t buffer_idx = (buffer_start_addr + i) % (n_desc * n_pts);
+                uint32_t raw_data = ram_s2mm.read_reg(buffer_idx * 4);
+                
+                // Extract 16-bit ADC value from 32-bit word (lower 16 bits)
+                uint16_t adc_raw = static_cast<uint16_t>(raw_data & 0xFFFF);
+                
+                // Convert to signed and then to voltage (±1.8V range)
+                int16_t adc_signed = static_cast<int16_t>(adc_raw);
+                float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 1.8f;
+                
+                result[i] = voltage;
+            }
+            
+            ctx.log<INFO>("Fast retrieved %u voltage samples from DMA buffer", num_samples);
+        } else {
+            // For large requests, fall back to full buffer read and copy
+            ctx.log<INFO>("Large request: falling back to full buffer read for %u samples", num_samples);
+            auto& full_data = get_adc_stream_voltages(num_samples);
+            for (uint32_t i = 0; i < num_samples && i < full_data.size(); i++) {
+                result[i] = full_data[i];
+            }
+        }
+        
+        return result;
+    }
+
   private:
     Context& ctx;
     PrecisionDac& precision_dac;
@@ -525,6 +662,7 @@ class CurrentRamp
     Memory<mem::axi_hp0>& axi_hp0;
     Memory<mem::axi_hp2>& axi_hp2;
     Memory<mem::ocm_s2mm>& ocm_s2mm;
+    Memory<mem::ocm_mm2s>& ocm_mm2s;
     Memory<mem::sclr>& sclr;
     
     // Clock and timing
@@ -564,10 +702,10 @@ class CurrentRamp
     }
     
     void set_descriptor_s2mm(uint32_t idx, uint32_t buffer_address, uint32_t buffer_length) {
-        ocm_s2mm.write_reg(0x40 * idx + Sg_regs::nxtdesc, mem::ocm_s2mm_addr + 0x40 * ((idx+1) % n_desc));
-        ocm_s2mm.write_reg(0x40 * idx + Sg_regs::buffer_address, buffer_address);
-        ocm_s2mm.write_reg(0x40 * idx + Sg_regs::control, buffer_length);
-        ocm_s2mm.write_reg(0x40 * idx + Sg_regs::status, 0);
+        ocm_mm2s.write_reg(0x40 * idx + Sg_regs::nxtdesc, mem::ocm_mm2s_addr + 0x40 * ((idx+1) % n_desc));
+        ocm_mm2s.write_reg(0x40 * idx + Sg_regs::buffer_address, buffer_address);
+        ocm_mm2s.write_reg(0x40 * idx + Sg_regs::control, buffer_length);
+        ocm_mm2s.write_reg(0x40 * idx + Sg_regs::status, 0);
     }
     
     void set_descriptors() {

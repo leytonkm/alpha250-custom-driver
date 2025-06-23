@@ -55,8 +55,11 @@ memory:
   - name: axi_hp2
     offset: '0xF800A000'
     range: 4K
-  - name: ocm_s2mm
+  - name: ocm_mm2s
     offset: '0xFFFF0000'
+    range: 32K
+  - name: ocm_s2mm
+    offset: '0xFFFF8000'
     range: 32K
   - name: sclr
     offset: '0xF8000000'

@@ -150,9 +150,6 @@ cell xilinx.com:ip:axi_interconnect:2.1 dma_interconnect {
 } {
   ACLK ps_0/FCLK_CLK0
   ARESETN proc_sys_reset_0/peripheral_aresetn
-  M00_AXI ps_0/S_AXI_GP0
-  M01_AXI ps_0/S_AXI_HP0
-  M02_AXI ps_0/S_AXI_HP2
   S00_ACLK ps_0/FCLK_CLK0
   S00_ARESETN proc_sys_reset_0/peripheral_aresetn
   S01_ACLK ps_0/FCLK_CLK0
@@ -164,6 +161,11 @@ cell xilinx.com:ip:axi_interconnect:2.1 dma_interconnect {
   M02_ACLK ps_0/FCLK_CLK0
   M02_ARESETN proc_sys_reset_0/peripheral_aresetn
 }
+
+# Connect DMA interconnect to PS interfaces
+connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M00_AXI] [get_bd_intf_pins ps_0/S_AXI_GP0]
+connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M01_AXI] [get_bd_intf_pins ps_0/S_AXI_HP0]
+connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M02_AXI] [get_bd_intf_pins ps_0/S_AXI_HP2]
 
 ####################################
 # ADC Streaming Pipeline with CIC Decimation
@@ -178,13 +180,16 @@ cell koheron:user:bus_multiplexer:1.0 adc_mux {
   sel [get_slice_pin [ctl_pin channel_select] 0 0]
 }
 
-# CIC Decimation Filter (following phase-noise-analyzer example)
+# ADC Streaming Pipeline with CIC Decimation (following phase-noise-analyzer exactly)
+
+# Define CIC parameters from config.yml
 set diff_delay [get_parameter cic_differential_delay]
 set dec_rate_default [get_parameter cic_decimation_rate_default]
 set dec_rate_min [get_parameter cic_decimation_rate_min]
 set dec_rate_max [get_parameter cic_decimation_rate_max]
 set n_stages [get_parameter cic_n_stages]
 
+# CIC Decimator - The Missing Core!
 cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Filter_Type Decimation
   Number_Of_Stages $n_stages
@@ -204,9 +209,10 @@ cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   aclk adc_dac/adc_clk
   s_axis_data_tdata adc_mux/dout
   s_axis_data_tvalid [get_constant_pin 1 1]
+  s_axis_data_aresetn rst_adc_clk/peripheral_aresetn
 }
 
-# CIC rate control
+# CIC Rate Control (connect the control register to the CIC core)
 cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
   AXIS_TDATA_WIDTH 16
 } {
@@ -240,7 +246,7 @@ cell xilinx.com:ip:axis_clock_converter:1.1 axis_clock_converter_0 {
 # Packet generator for DMA transfers
 cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
   TDATA_WIDTH 64
-  PKT_LENGTH [expr 64 * 1024]
+  PKT_LENGTH [expr 1024 * 1024]
 } {
   aclk ps_0/FCLK_CLK0
   resetn proc_sys_reset_0/peripheral_aresetn
@@ -278,7 +284,7 @@ set_property offset [get_memory_offset dma] [get_bd_addr_segs {ps_0/Data/SEG_axi
 # Scatter Gather interface in On Chip Memory (use GP0 HIGH_OCM like adc-dac-dma)
 assign_bd_address [get_bd_addr_segs {ps_0/S_AXI_GP0/GP0_HIGH_OCM }]
 set_property range 64K [get_bd_addr_segs {axi_dma_0/Data_SG/SEG_ps_0_GP0_HIGH_OCM}]
-set_property offset [get_memory_offset ocm_s2mm] [get_bd_addr_segs {axi_dma_0/Data_SG/SEG_ps_0_GP0_HIGH_OCM}]
+set_property offset [get_memory_offset ocm_mm2s] [get_bd_addr_segs {axi_dma_0/Data_SG/SEG_ps_0_GP0_HIGH_OCM}]
 
 # S2MM interface in DDR (use HP2 like adc-dac-dma)
 assign_bd_address [get_bd_addr_segs {ps_0/S_AXI_HP2/HP2_DDR_LOWOCM }]
