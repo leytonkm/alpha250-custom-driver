@@ -132,8 +132,9 @@ class UdpReceiver:
                 
             samples = struct.unpack(f'<{len(sample_data)//2}H', sample_data)
             
-            # Convert to voltage (assuming ±1.8V range, 16-bit ADC)
-            samples_voltage = [(s - 32768) * 1.8 / 32768.0 if s >= 32768 else s * 1.8 / 32768.0 for s in samples]
+            # Convert to voltage (Alpha250: 14-bit ADC, ±500mV range, zero-padded to 16-bit)
+            samples_14bit = [s & 0x3FFF for s in samples]  # Extract lower 14 bits  
+            samples_voltage = [((s / 16383.0) - 0.5) * 1.0 for s in samples_14bit]
             
             self.stats['packets_received'] += 1
             self.stats['samples_received'] += len(samples)

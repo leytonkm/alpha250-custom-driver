@@ -169,6 +169,7 @@ connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M02_AXI] [get_bd_intf_pin
 
 ####################################
 # ADC Streaming Pipeline with CIC Decimation
+# Following phase-noise-analyzer pattern exactly
 ####################################
 
 # ADC channel multiplexer
@@ -180,8 +181,6 @@ cell koheron:user:bus_multiplexer:1.0 adc_mux {
   sel [get_slice_pin [ctl_pin channel_select] 0 0]
 }
 
-# ADC Streaming Pipeline with CIC Decimation (following phase-noise-analyzer exactly)
-
 # Define CIC parameters from config.yml
 set diff_delay [get_parameter cic_differential_delay]
 set dec_rate_default [get_parameter cic_decimation_rate_default]
@@ -189,7 +188,7 @@ set dec_rate_min [get_parameter cic_decimation_rate_min]
 set dec_rate_max [get_parameter cic_decimation_rate_max]
 set n_stages [get_parameter cic_n_stages]
 
-# CIC Decimator - The Missing Core!
+# CIC Decimator - Following phase-noise-analyzer exactly
 cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Filter_Type Decimation
   Number_Of_Stages $n_stages
@@ -209,14 +208,13 @@ cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   aclk adc_dac/adc_clk
   s_axis_data_tdata adc_mux/dout
   s_axis_data_tvalid [get_constant_pin 1 1]
-  s_axis_data_aresetn rst_adc_clk/peripheral_aresetn
 }
 
-# CIC Rate Control (connect the control register to the CIC core)
+# CIC Rate Control - use correct register name
 cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
   AXIS_TDATA_WIDTH 16
 } {
-  cfg_data [ctl_pin cic_rate]
+  cfg_data [ctl_pin decimation_rate]
   aclk adc_dac/adc_clk
   aresetn rst_adc_clk/peripheral_aresetn
   M_AXIS cic_decimator/S_AXIS_CONFIG

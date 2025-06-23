@@ -80,7 +80,7 @@ control_registers:
   - trig
   # DMA streaming control
   - channel_select        # ADC channel selection for streaming
-  - cic_rate              # CIC decimation rate control
+  - decimation_rate       # CIC decimation rate control
 
 status_registers:
   # Real-time data

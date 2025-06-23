@@ -115,16 +115,16 @@ class UDPReceiver:
             
             self.stats['last_sequence'] = sequence
             
-            # Parse samples (16-bit integers)
+            # Parse samples (16-bit values)
             sample_data = data[16:]
             if len(sample_data) % 2 != 0:
                 return None
                 
             samples = struct.unpack(f'<{len(sample_data)//2}H', sample_data)
             
-            # Convert to signed 16-bit and then to voltage (assuming ±1.8V range)
-            samples_signed = [(s - 32768) if s >= 32768 else s for s in samples]
-            samples_voltage = [s * 1.8 / 32768.0 for s in samples_signed]
+            # Convert to voltage (Alpha250: 14-bit ADC, ±500mV range, zero-padded to 16-bit)
+            samples_14bit = [s & 0x3FFF for s in samples]  # Extract lower 14 bits
+            samples_voltage = [((s / 16383.0) - 0.5) * 1.0 for s in samples_14bit]
             
             self.stats['packets_received'] += 1
             self.stats['samples_received'] += len(samples)
@@ -133,7 +133,7 @@ class UDPReceiver:
                 'sequence': sequence,
                 'timestamp': timestamp,
                 'samples': np.array(samples_voltage),
-                'raw_samples': np.array(samples_signed)
+                'raw_samples': np.array(samples)
             }
             
         except struct.error as e:
