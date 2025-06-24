@@ -559,7 +559,8 @@ class CurrentRamp
         // ADC delivers 14-bit two's-complement data, sign-extended to 16 bits by FPGA
         // Range: −8192 … +8191  →  −0.5 V … +0.5 V (1 Vpp)
         int16_t adc_signed = static_cast<int16_t>(adc_raw & 0xFFFF);
-        float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f; // ±0.5 V full-scale
+        // Correct for 14-bit ADC with range ±0.5V
+        float voltage = (static_cast<float>(adc_signed) / 8192.0f) * 0.5f;
         return voltage;
     }
     
@@ -573,74 +574,58 @@ class CurrentRamp
 
     // === DATA RETRIEVAL FUNCTIONS ===
     
-    // Fixed: Use the correct array reading pattern from adc-dac-dma
-    auto& get_adc_stream_data() {
-        adc_data = ram_s2mm.read_array<uint32_t, n_desc * n_pts>();
-        return adc_data;
-    }
-    
-    // Convert raw data to voltages - return array reference for recv_array compatibility
-    auto& get_adc_stream_voltages(uint32_t num_samples) {
-        if (num_samples > n_desc * n_pts) {
-            num_samples = n_desc * n_pts;
-            ctx.log<WARNING>("Requested samples exceeds buffer size, limiting to %u", num_samples);
+    // This is the new, robust data retrieval function.
+    // It intelligently reads the most recent samples from the DMA circular buffer.
+    std::vector<float> get_adc_stream_voltages(uint32_t num_samples) {
+        if (!streaming_active) {
+            ctx.log<WARNING>("DMA streaming is not active, returning empty vector.");
+            return {};
         }
-        
-        // Get raw data using the working pattern
-        auto& raw_data = get_adc_stream_data();
-        
-        // Convert to voltages in the voltage_data array
-        for (uint32_t i = 0; i < num_samples; i++) {
-            // Extract 16-bit signed sample and convert to volts (±0.5 V)
-            int16_t adc_signed = static_cast<int16_t>(raw_data[i] & 0xFFFF);
-            float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f;
-            
-            voltage_data[i] = voltage;
+
+        // We can't request more data than is available in the buffer history.
+        // We reserve one packet as a safety margin.
+        if (num_samples > (n_desc - 1) * n_pts) {
+            num_samples = (n_desc - 1) * n_pts;
+            ctx.log<WARNING>("Requested samples exceeds buffer history, limiting to %u", num_samples);
         }
+
+        // 1. Find the current write position of the DMA. We don't stop the DMA,
+        // which prevents sample loss and allows for continuous monitoring.
+        uint32_t current_desc_idx = get_current_descriptor_index();
         
-        ctx.log<INFO>("Retrieved %u voltage samples from DMA buffer", num_samples);
-        return voltage_data;
-    }
-    
-    // OPTIMIZED: Fast retrieval for small sample counts
-    // Returns a vector with only the requested samples
-    std::vector<float> get_adc_stream_voltages_fast(uint32_t num_samples) {
-        if (num_samples > n_desc * n_pts) {
-            num_samples = n_desc * n_pts;
-            ctx.log<WARNING>("Requested samples exceeds buffer size, limiting to %u", num_samples);
-        }
-        
+        // 2. Determine the most recent "safe" block of data to read.
+        // We go back two full descriptors from the current one to ensure we are reading
+        // from a region that is not actively being written to.
+        const uint32_t total_buffer_samples = n_desc * n_pts;
+        uint32_t last_safe_desc_idx = (current_desc_idx + n_desc - 2) % n_desc;
+        uint32_t end_sample_in_buffer = (last_safe_desc_idx + 1) * n_pts;
+
+        // 3. Calculate the start position for the read, handling buffer wrap-around.
+        uint32_t start_sample_in_buffer = (end_sample_in_buffer + total_buffer_samples - num_samples) % total_buffer_samples;
+
         std::vector<float> result(num_samples);
-        
-        // For small requests, read only what we need directly from memory
-        if (num_samples <= 65536) {  // Less than 64K samples - read directly
-            ctx.log<INFO>("Fast path: reading %u samples directly from DMA buffer", num_samples);
+        ctx.log<INFO>("Reading %u fresh samples from DMA circular buffer...", num_samples);
+
+        // 4. Read the data block, unpacking each 16-bit sample correctly.
+        for (uint32_t i = 0; i < num_samples; i++) {
+            uint32_t buffer_idx = (start_sample_in_buffer + i) % total_buffer_samples;
             
-            // Read from the same buffer position as the slow method (start of buffer)
-            uint32_t buffer_start_addr = 0;  // Start from beginning like slow method
+            // Correctly unpack 16-bit sample from 64-bit DMA bus accessed via 32-bit reads.
+            uint32_t sample_byte_offset = buffer_idx * 2;
+            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
+            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
             
-            // Read only the requested samples directly
-            for (uint32_t i = 0; i < num_samples; i++) {
-                uint32_t buffer_idx = (buffer_start_addr + i) % (n_desc * n_pts);
-                uint32_t raw_data = ram_s2mm.read_reg(buffer_idx * 4);
-                
-                // Extract 16-bit signed sample and convert to volts (±0.5 V)
-                int16_t adc_signed = static_cast<int16_t>(raw_data & 0xFFFF);
-                float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f;
-                
-                result[i] = voltage;
-            }
-            
-            ctx.log<INFO>("Fast retrieved %u voltage samples from DMA buffer", num_samples);
-        } else {
-            // For large requests, fall back to full buffer read and copy
-            ctx.log<INFO>("Large request: falling back to full buffer read for %u samples", num_samples);
-            auto& full_data = get_adc_stream_voltages(num_samples);
-            for (uint32_t i = 0; i < num_samples && i < full_data.size(); i++) {
-                result[i] = full_data[i];
-            }
+            uint16_t raw_data = (sample_byte_offset % 4 == 0)
+                                    ? (word32 & 0xFFFF)
+                                    : (word32 >> 16);
+
+            int16_t adc_signed = static_cast<int16_t>(raw_data);
+            // Use empirically corrected scaling factor for CIC filter gain
+            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+            result[i] = voltage;
         }
-        
+
+        ctx.log<INFO>("Data retrieval complete.");
         return result;
     }
 
@@ -678,10 +663,6 @@ class CurrentRamp
     bool streaming_active;
     uint32_t decimation_rate;
     
-    // DMA data buffers (following adc-dac-dma pattern)
-    std::array<uint32_t, n_desc * n_pts> adc_data;
-    std::array<float, n_desc * n_pts> voltage_data;
-    
     void init_dma_system() {
         // Unlock SCLR (following adc-dac-dma example)
         sclr.write<Sclr_regs::sclr_unlock>(0xDF0D);
@@ -706,7 +687,10 @@ class CurrentRamp
     
     void set_descriptors() {
         for (uint32_t i = 0; i < n_desc; i++) {
-            set_descriptor_s2mm(i, mem::ram_s2mm_addr + i * 4 * n_pts, 4 * n_pts);
+            // Corrected buffer allocation: each descriptor points to a region
+            // of size 2 * n_pts (since samples are 2 bytes).
+            // The buffer length for the DMA is also 2 * n_pts.
+            set_descriptor_s2mm(i, mem::ram_s2mm_addr + i * 2 * n_pts, 2 * n_pts);
         }
     }
 };

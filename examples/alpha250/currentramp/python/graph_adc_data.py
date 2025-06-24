@@ -43,8 +43,8 @@ class CurrentRamp:
         return self.client.recv_double()
     
     @command()
-    def get_adc_stream_voltages_fast(self, num_samples):
-        """Get ADC data - OPTIMIZED VERSION (85-2,126x faster!)"""
+    def get_adc_stream_voltages(self, num_samples):
+        """Get the most recent ADC voltage samples from the DMA buffer."""
         return self.client.recv_vector(dtype='float32')
     
     @command()
@@ -118,9 +118,9 @@ def capture_adc_data(driver, duration_seconds=10, sample_rate_khz=100):
         remaining = total_samples - samples_captured
         current_chunk = min(chunk_size, remaining)
         
-        # Capture chunk using FAST method (85-2,126x speedup!)
+        # Capture chunk using the robust, fresh-data method
         chunk_start = time.time()
-        voltage_chunk = driver.get_adc_stream_voltages_fast(current_chunk)
+        voltage_chunk = driver.get_adc_stream_voltages(current_chunk)
         chunk_time = time.time() - chunk_start
         
         all_data.extend(voltage_chunk)
