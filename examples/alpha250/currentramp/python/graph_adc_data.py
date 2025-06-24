@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Graph ADC Data Over Time
-Simple script to capture and plot ADC data over a specified time period
-Uses the optimized DMA streaming for fast, continuous data acquisition
+Live Graph ADC Data
+Script to capture and plot ADC data in real-time with interactive controls.
+Uses optimized DMA streaming for fast, continuous data acquisition.
 """
 
 import os
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button, RadioButtons
 from koheron import connect, command
 
 class CurrentRamp:
@@ -64,182 +65,174 @@ def connect_to_device():
         print(f"❌ Connection failed: {e}")
         return None
 
-def capture_adc_data(driver, duration_seconds=10, sample_rate_khz=100):
-    """
-    Capture ADC data over specified time period
-    
-    Args:
-        driver: CurrentRamp driver instance
-        duration_seconds: How long to capture (e.g., 10 seconds)
-        sample_rate_khz: Sample rate in kHz (30.5, 50, 100, 200)
-    
-    Returns:
-        timestamps, voltage_data
-    """
-    print(f"🎯 Capturing ADC data for {duration_seconds} seconds at {sample_rate_khz}kHz...")
-    
-    # Set up decimation rate for desired sample rate
-    decimation_rates = {
-        30.5: 8192,   # 250MHz / 8192 = 30.5kHz
-        50: 5000,     # 250MHz / 5000 = 50kHz  
-        100: 2500,    # 250MHz / 2500 = 100kHz
-        200: 1250,    # 250MHz / 1250 = 200kHz
-    }
-    
-    if sample_rate_khz not in decimation_rates:
-        print(f"⚠️  Unsupported sample rate {sample_rate_khz}kHz, using 100kHz")
-        sample_rate_khz = 100
-    
-    # Configure and start streaming
-    driver.set_cic_decimation_rate(decimation_rates[sample_rate_khz])
-    time.sleep(0.5)
-    
-    actual_fs = driver.get_decimated_sample_rate()
-    print(f"   Actual sample rate: {actual_fs:.0f} Hz")
-    
-    # Start streaming if not already active
-    if not driver.is_adc_streaming_active():
-        driver.start_adc_streaming()
-        time.sleep(2.0)  # Let buffer fill
-    
-    # Calculate how many samples we need
-    total_samples = int(actual_fs * duration_seconds)
-    print(f"   Target samples: {total_samples:,}")
-    
-    # Capture data in chunks to avoid memory issues
-    chunk_size = min(50000, total_samples)  # 50k samples per chunk
-    all_data = []
-    samples_captured = 0
-    
-    start_time = time.time()
-    
-    while samples_captured < total_samples:
-        # Calculate remaining samples
-        remaining = total_samples - samples_captured
-        current_chunk = min(chunk_size, remaining)
+class LivePlot:
+    def __init__(self, driver, sample_rate_khz, initial_duration_s):
+        self.driver = driver
+        self.paused = False
         
-        # Capture chunk using the robust, fresh-data method
-        chunk_start = time.time()
-        voltage_chunk = driver.get_adc_stream_voltages(current_chunk)
-        chunk_time = time.time() - chunk_start
+        # Configure decimation based on sample rate
+        self.setup_adc_rate(sample_rate_khz)
         
-        all_data.extend(voltage_chunk)
-        samples_captured += len(voltage_chunk)
-        
-        elapsed = time.time() - start_time
-        progress = samples_captured / total_samples * 100
-        
-        print(f"   Progress: {progress:.1f}% ({samples_captured:,}/{total_samples:,}) "
-              f"- chunk: {len(voltage_chunk):,} in {chunk_time:.3f}s")
-        
-        # Small delay to avoid overwhelming the system
-        time.sleep(0.01)
-    
-    total_time = time.time() - start_time
-    print(f"   ✅ Captured {len(all_data):,} samples in {total_time:.1f}s")
-    
-    # Create timestamps
-    timestamps = np.arange(len(all_data)) / actual_fs
-    
-    return timestamps, np.array(all_data), actual_fs
+        self.plot_duration_s = initial_duration_s
+        self.plot_points = int(self.plot_duration_s * self.actual_fs)
+        print(f"   Fetching {self.plot_points} points per update.")
 
-def plot_adc_data(timestamps, voltage_data, sample_rate, duration, save_file=None):
-    """Create a beautiful plot of the ADC data"""
+        # --- Figure and Axes Setup ---
+        self.fig = plt.figure(figsize=(14, 8))
+        # Main plot area is on the left, widgets on the right
+        self.ax = self.fig.add_axes([0.1, 0.1, 0.7, 0.85]) # l, b, w, h
+        # Axes for widgets
+        self.ax_pause = self.fig.add_axes([0.83, 0.85, 0.15, 0.075])
+        self.ax_vscale = self.fig.add_axes([0.83, 0.75, 0.15, 0.075])
+        self.ax_vreset = self.fig.add_axes([0.83, 0.65, 0.15, 0.075])
+        self.ax_tscale = self.fig.add_axes([0.83, 0.35, 0.15, 0.25])
+        
+        self.fig.canvas.manager.set_window_title('Live ADC Scope')
+
+        # --- Plotting Objects ---
+        self.time_axis = np.arange(self.plot_points) / self.actual_fs
+        self.line, = self.ax.plot(self.time_axis, np.zeros(self.plot_points), 'b-', linewidth=1)
+        
+        self.setup_plot_cosmetics()
+
+        # --- Widgets ---
+        self.btn_pause = Button(self.ax_pause, 'Pause')
+        self.btn_pause.on_clicked(self.toggle_pause)
+
+        self.btn_vscale = Button(self.ax_vscale, 'Autoscale V')
+        self.btn_vscale.on_clicked(self.autoscale_v)
+
+        self.btn_vreset = Button(self.ax_vreset, 'Default V')
+        self.btn_vreset.on_clicked(self.default_v)
+
+        self.radio_tscale = RadioButtons(
+            self.ax_tscale, 
+            ('0.1s', '0.5s', '1.0s', '2.0s', '5.0s'),
+            active=2, # Default to 1.0s
+            activecolor='blue'
+        )
+        self.radio_tscale.on_clicked(self.set_time_scale)
+        self.ax_tscale.set_title("Time Scale", y=1.0, pad=15)
+
+    def setup_plot_cosmetics(self):
+        """Set title, labels, grids etc. for the main plot area."""
+        self.ax.set_title("Live ADC Data")
+        self.ax.set_xlabel("Time (s)")
+        self.ax.set_ylabel("ADC Voltage (V)")
+        self.ax.grid(True, alpha=0.4)
+        self.ax.set_xlim(0, self.plot_duration_s)
+        self.ax.set_ylim(-0.5, 0.5)
+
+    def setup_adc_rate(self, sample_rate_khz):
+        """Configure CIC decimation rate on the device."""
+        decimation_rates = {
+            30.5: 8192, 50: 5000, 100: 2500, 200: 1250,
+        }
+        if sample_rate_khz not in decimation_rates:
+            print(f"⚠️  Unsupported sample rate {sample_rate_khz}kHz, using 100kHz")
+            self.driver.set_cic_decimation_rate(decimation_rates[100])
+        else:
+            self.driver.set_cic_decimation_rate(decimation_rates[sample_rate_khz])
+        
+        time.sleep(0.1)
+        self.actual_fs = self.driver.get_decimated_sample_rate()
+        print(f"   Actual sample rate: {self.actual_fs:.0f} Hz")
     
-    print(f"📊 Creating plot...")
+    def toggle_pause(self, event):
+        """Callback to pause/resume the plot."""
+        self.paused = not self.paused
+        self.btn_pause.label.set_text('Run' if self.paused else 'Pause')
+
+    def autoscale_v(self, event):
+        """Callback to autoscale the Y (voltage) axis."""
+        if not self.paused:
+            print("⚠️  Please pause the plot before autoscaling.")
+            return
+        y_data = self.line.get_ydata()
+        min_v, max_v = np.min(y_data), np.max(y_data)
+        margin = (max_v - min_v) * 0.1 + 1e-9 # Add small value to avoid flat lines
+        self.ax.set_ylim(min_v - margin, max_v + margin)
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
-    fig.suptitle(f'ADC Data Capture - {duration:.1f} seconds at {sample_rate:.0f} Hz', 
-                 fontsize=16, fontweight='bold')
-    
-    # Full time series
-    ax1.plot(timestamps, voltage_data, 'b-', linewidth=0.8, alpha=0.8)
-    ax1.set_xlabel('Time (seconds)')
-    ax1.set_ylabel('ADC Voltage (V)')
-    ax1.set_title(f'Complete Time Series ({len(voltage_data):,} samples)')
-    ax1.grid(True, alpha=0.3)
-    
-    # Add statistics box
-    stats_text = f"""Statistics:
-Duration: {duration:.1f}s
-Samples: {len(voltage_data):,}
-Rate: {sample_rate:.0f} Hz
-Range: {np.min(voltage_data):+.3f}V to {np.max(voltage_data):+.3f}V
-Mean: {np.mean(voltage_data):+.3f}V
-Std: {np.std(voltage_data):.3f}V"""
-    
-    ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, 
-             verticalalignment='top', bbox=dict(boxstyle='round', 
-             facecolor='lightblue', alpha=0.8), fontfamily='monospace')
-    
-    # Zoomed view of first 2 seconds (or all data if shorter)
-    zoom_duration = min(2.0, duration)
-    zoom_samples = int(zoom_duration * sample_rate)
-    
-    if len(voltage_data) > zoom_samples:
-        ax2.plot(timestamps[:zoom_samples], voltage_data[:zoom_samples], 
-                'r-', linewidth=1.0)
-        ax2.set_title(f'Zoomed View - First {zoom_duration} seconds')
-    else:
-        ax2.plot(timestamps, voltage_data, 'r-', linewidth=1.0)
-        ax2.set_title('Full Data (< 2 seconds)')
-    
-    ax2.set_xlabel('Time (seconds)')
-    ax2.set_ylabel('ADC Voltage (V)')
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # Save plot
-    if save_file is None:
-        save_file = f"adc_capture_{duration:.0f}s_{sample_rate:.0f}hz.png"
-    
-    plt.savefig(save_file, dpi=150, bbox_inches='tight')
-    print(f"💾 Plot saved as: {save_file}")
-    
-    # Show plot
-    plt.show()
-    
-    return save_file
+    def default_v(self, event):
+        """Callback to reset the Y axis to the default range."""
+        self.ax.set_ylim(-0.5, 0.5)
+
+    def set_time_scale(self, label):
+        """Callback to change the time window of the plot."""
+        self.plot_duration_s = float(label.replace('s',''))
+        self.plot_points = int(self.plot_duration_s * self.actual_fs)
+        self.time_axis = np.arange(self.plot_points) / self.actual_fs
+        
+        # Update plot objects to match new data size
+        self.line.set_data(self.time_axis, np.zeros(self.plot_points))
+        self.ax.set_xlim(0, self.plot_duration_s)
+        print(f"Time scale set to {self.plot_duration_s}s, plotting {self.plot_points} points.")
+
+    def update(self):
+        """Fetch new data and update the plot line if not paused."""
+        if self.paused:
+            return
+
+        voltage_data = self.driver.get_adc_stream_voltages(self.plot_points)
+        if len(voltage_data) == self.plot_points:
+            self.line.set_ydata(voltage_data)
+
+    def run(self):
+        """Start the main plotting loop."""
+        # Start streaming on the device
+        if not self.driver.is_adc_streaming_active():
+            print("   Starting ADC streaming...")
+            self.driver.start_adc_streaming()
+            time.sleep(1.0) # Let buffer fill a bit
+        
+        plt.ion() # Interactive mode ON
+        print("\n🚀 Live plot started. Close the plot window to stop.")
+
+        while plt.fignum_exists(self.fig.number):
+            try:
+                self.update()
+                self.fig.canvas.draw()
+                self.fig.canvas.flush_events()
+                plt.pause(0.05)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"⚠️  Error during plotting: {e}")
+                time.sleep(1)
+
+        print("\nPlot window closed.")
 
 def main():
-    """Main function - customize this for your needs!"""
+    """Main function to set up and run the live plot."""
     print("=" * 60)
-    print("🎯 ADC Data Graphing Tool")
-    print("   Optimized for fast, high-quality data capture")
+    print("🎯 Live ADC Data Graphing Tool")
+    print("   Close the plot window to exit.")
     print("=" * 60)
     
     # Connect to device
     driver = connect_to_device()
     if not driver:
-        print("❌ Cannot connect to device")
         return 1
     
     # === CUSTOMIZE THESE PARAMETERS ===
-    duration_seconds = 1       # How long to capture
     sample_rate_khz = 100      # Sample rate: 30.5, 50, 100, or 200 kHz
+    initial_duration_s = 1.0   # Initial time window in seconds
     
-    print(f"🎯 Goal: Graph ADC input for {duration_seconds} seconds")
-    print(f"📊 Sample rate: {sample_rate_khz} kHz")
+    print(f"📊 Target sample rate: {sample_rate_khz} kHz")
     
     try:
-        # Capture data
-        timestamps, voltage_data, actual_fs = capture_adc_data(
-            driver, duration_seconds, sample_rate_khz)
-        
-        # Create plot
-        plot_file = plot_adc_data(timestamps, voltage_data, actual_fs, duration_seconds)
-        
-        print(f"\n🎉 SUCCESS!")
-        print(f"✅ Captured {len(voltage_data):,} samples over {duration_seconds} seconds")
-        print(f"📊 Plot saved as: {plot_file}")
-        print(f"⚡ Used optimized DMA streaming (85-2,126x faster!)")
-        
-        return 0
-        
+        plotter = LivePlot(driver, sample_rate_khz, initial_duration_s)
+        plotter.run()
     except Exception as e:
-        print(f"❌ Error: {e}")
-        return 1
+        print(f"❌ An error occurred: {e}")
+    finally:
+        # --- Cleanup ---
+        if driver and driver.is_adc_streaming_active():
+            driver.stop_adc_streaming()
+            print("   ADC streaming stopped.")
+        plt.ioff() # Interactive mode OFF
+        print("✅ Script finished.")
+        return 0
 
 if __name__ == "__main__":
     exit(main()) 
