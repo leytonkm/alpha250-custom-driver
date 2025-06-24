@@ -556,13 +556,10 @@ class CurrentRamp
     }
     
     float adc_to_voltage(uint32_t adc_raw) {
-        // Alpha250 ADCs: 14-bit resolution LTC2157-14, ±500mV input range
-        // FPGA zero-pads to 16-bit: [2 zero bits][14-bit ADC data]
-        // Extract the 14-bit ADC data from bits 13:0
-        uint16_t adc_14bit = adc_raw & 0x3FFF;  // Mask to get lower 14 bits
-        
-        // Convert 14-bit unsigned to voltage: 0→-500mV, 8191→0mV, 16383→+500mV
-        float voltage = ((static_cast<float>(adc_14bit) / 16383.0f) - 0.5f) * 1.0f;
+        // ADC delivers 14-bit two's-complement data, sign-extended to 16 bits by FPGA
+        // Range: −8192 … +8191  →  −0.5 V … +0.5 V (1 Vpp)
+        int16_t adc_signed = static_cast<int16_t>(adc_raw & 0xFFFF);
+        float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f; // ±0.5 V full-scale
         return voltage;
     }
     
@@ -594,11 +591,9 @@ class CurrentRamp
         
         // Convert to voltages in the voltage_data array
         for (uint32_t i = 0; i < num_samples; i++) {
-            // Extract 16-bit ADC value from 32-bit word (lower 16 bits)
-            uint16_t adc_raw = static_cast<uint16_t>(raw_data[i] & 0xFFFF);
-            
-            // Alpha250 ADCs: 14-bit resolution, -500mV to +500mV input range
-            float voltage = ((static_cast<float>(adc_raw) / 65535.0f) - 0.5f) * 1.0f;
+            // Extract 16-bit signed sample and convert to volts (±0.5 V)
+            int16_t adc_signed = static_cast<int16_t>(raw_data[i] & 0xFFFF);
+            float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f;
             
             voltage_data[i] = voltage;
         }
@@ -629,11 +624,9 @@ class CurrentRamp
                 uint32_t buffer_idx = (buffer_start_addr + i) % (n_desc * n_pts);
                 uint32_t raw_data = ram_s2mm.read_reg(buffer_idx * 4);
                 
-                // Extract 16-bit ADC value from 32-bit word (lower 16 bits)
-                uint16_t adc_raw = static_cast<uint16_t>(raw_data & 0xFFFF);
-                
-                // Alpha250 ADCs: 14-bit resolution, -500mV to +500mV input range
-                float voltage = ((static_cast<float>(adc_raw) / 65535.0f) - 0.5f) * 1.0f;
+                // Extract 16-bit signed sample and convert to volts (±0.5 V)
+                int16_t adc_signed = static_cast<int16_t>(raw_data & 0xFFFF);
+                float voltage = (static_cast<float>(adc_signed) / 32768.0f) * 0.5f;
                 
                 result[i] = voltage;
             }

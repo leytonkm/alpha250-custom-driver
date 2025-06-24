@@ -130,11 +130,12 @@ for {set i 0} {$i < 2} {incr i} {
     }
 
     if {[info exists adc_dac_extra_delay]} {
-        connect_pin adc$i [get_Q_pin [get_concat_pin [list [get_constant_pin 0 2] unrandomizer$i/dout] concat_adc$i] $adc_dac_extra_delay noce mmcm/clk_out1]
+        # Sign-extend 14-bit two's-complement data -> 16-bit (replicate MSB twice)
+        connect_pin adc$i [get_Q_pin [get_concat_pin [list [get_slice_pin unrandomizer$i/dout 13 13] [get_slice_pin unrandomizer$i/dout 13 13] unrandomizer$i/dout] concat_adc$i] $adc_dac_extra_delay noce mmcm/clk_out1]
     } else {
-        connect_pin adc$i [get_concat_pin [list [get_constant_pin 0 2] unrandomizer$i/dout] concat_adc$i]
+        # Sign-extend when no extra delay is used
+        connect_pin adc$i [get_concat_pin [list [get_slice_pin unrandomizer$i/dout 13 13] [get_slice_pin unrandomizer$i/dout 13 13] unrandomizer$i/dout] concat_adc$i]
     }
-
 }
 
 # DAC SelectIO

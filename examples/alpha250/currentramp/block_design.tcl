@@ -201,7 +201,8 @@ cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Clock_Frequency [expr [get_parameter adc_clk] / 1000000.]
   Input_Data_Width 16
   Quantization Truncation
-  Output_Data_Width 32
+  Output_Data_Width 16
+  Gain_Correction true
   Use_Xtreme_DSP_Slice false
   HAS_DOUT_TREADY true
 } {
@@ -217,16 +218,18 @@ cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
   cfg_data [ctl_pin decimation_rate]
   aclk adc_dac/adc_clk
   aresetn rst_adc_clk/peripheral_aresetn
-  M_AXIS cic_decimator/S_AXIS_CONFIG
 }
 
-# Width converter: 32-bit CIC output to 64-bit for DMA efficiency
+# Explicitly connect AXIS config interface between rate control and CIC (Vivado 2017.2 expects connect_bd_intf_net)
+connect_bd_intf_net [get_bd_intf_pins cic_rate_control/M_AXIS] [get_bd_intf_pins cic_decimator/S_AXIS_CONFIG]
+
+# Width converter: 16-bit stream to 64-bit for DMA
 cell xilinx.com:ip:axis_dwidth_converter:1.1 axis_dwidth_converter_0 {
-  S_TDATA_NUM_BYTES 4
+  S_TDATA_NUM_BYTES 2
   M_TDATA_NUM_BYTES 8
 } {
-  aclk adc_dac/adc_clk
-  aresetn rst_adc_clk/peripheral_aresetn
+  aclk     adc_dac/adc_clk
+  aresetn  rst_adc_clk/peripheral_aresetn
   S_AXIS cic_decimator/M_AXIS_DATA
 }
 
