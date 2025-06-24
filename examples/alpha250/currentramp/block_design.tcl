@@ -24,8 +24,11 @@ cell pavel-demin:user:axis_variable:1.0 ramp_phase_increment {
 } {
   cfg_data [ctl_pin ramp_freq_incr]
   aclk adc_dac/adc_clk
-  M_AXIS ramp_timer/S_AXIS_CONFIG
+  aresetn rst_adc_clk/peripheral_aresetn
 }
+
+# Explicitly connect AXIS config interface for ramp frequency (Vivado 2017.2 expects connect_bd_intf_net)
+connect_bd_intf_net [get_bd_intf_pins ramp_phase_increment/M_AXIS] [get_bd_intf_pins ramp_timer/S_AXIS_CONFIG]
 
 # Ramp waveform generator - converts phase to sawtooth
 # Take MSBs of phase accumulator as sawtooth (linear ramp)
@@ -247,7 +250,8 @@ cell xilinx.com:ip:axis_clock_converter:1.1 axis_clock_converter_0 {
 # Packet generator for DMA transfers
 cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
   TDATA_WIDTH 64
-  PKT_LENGTH [expr 1024 * 1024]
+  # Shorter packet (16 384 × 64-bit words ≈ 0.16 s at 100 kS/s)
+  PKT_LENGTH 16384
 } {
   aclk ps_0/FCLK_CLK0
   resetn proc_sys_reset_0/peripheral_aresetn

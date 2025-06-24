@@ -8,6 +8,7 @@
 #ifndef __DRIVERS_CURRENTRAMP_HPP__
 #define __DRIVERS_CURRENTRAMP_HPP__
 
+#include <cstdint>
 #include <context.hpp>
 #include <boards/alpha250/drivers/precision-dac.hpp>
 #include <boards/alpha250/drivers/clock-generator.hpp>
@@ -105,15 +106,18 @@ class CurrentRamp
         }
         
         dc_voltage = voltage;
+        
         if (dc_enabled) {
-            precision_dac.set_dac_value_volts(0, voltage);
+            precision_dac.set_dac_value_volts(0, dc_voltage);
         }
+        
         ctx.log<INFO>("DC temperature voltage set to: %.3f V", static_cast<double>(voltage));
     }
     
     void enable_temperature_dc_output(bool enable) {
         dc_enabled = enable;
-        if (enable) {
+        
+        if (dc_enabled) {
             precision_dac.set_dac_value_volts(0, dc_voltage);
             ctx.log<INFO>("DC output enabled: %.3f V", static_cast<double>(dc_voltage));
         } else {
@@ -166,6 +170,8 @@ class CurrentRamp
             ctx.log<ERROR>("Invalid frequency: %.3f Hz (must be 0.001-1000 Hz)", frequency);
             return;
         }
+        
+        // Update the member variable
         ramp_frequency = frequency;
         
         // Calculate phase increment for DDS
