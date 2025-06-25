@@ -1,7 +1,7 @@
 ---
-name: currentramp
+name: laser-control
 board: boards/alpha250
-version: 0.2.1
+version: 2.0.0
 
 cores:
   # Basic register control
@@ -147,7 +147,7 @@ drivers:
   - boards/alpha250/drivers/precision-dac.hpp
   - boards/alpha250/drivers/spi-config.hpp
   # Application drivers
-  - ./currentramp.hpp
+  - ./laser-control.hpp
 
 web:
   - web/koheron.ts
