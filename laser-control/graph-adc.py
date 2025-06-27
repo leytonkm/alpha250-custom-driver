@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Live Graph ADC Data
-Script to capture and plot ADC data in real-time with interactive controls.
-Uses optimized DMA streaming for fast, continuous data acquisition.
-"""
 
 import os
 import time

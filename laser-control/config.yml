@@ -156,3 +156,7 @@ web:
   - ./web/voltage-control.html
   - ./web/voltage-control.ts
   - ./web/app.ts
+  - ./web/adc-graph-basics.html
+  - ./web/adc-graph/adc-driver.ts
+  - ./web/adc-graph/plot.ts
+  - ./web/adc-graph/adc-graph-app.ts

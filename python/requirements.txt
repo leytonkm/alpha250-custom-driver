@@ -4,3 +4,5 @@ click
 # For koheron-sdk
 pyyaml
 jinja2
+PyQt6
+pyqtgraph

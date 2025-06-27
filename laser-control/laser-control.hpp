@@ -1,4 +1,4 @@
-/// Current Ramp Driver
+/// Laser-Control Driver
 ///
 /// Driver for controlling laser current ramp (temperature and laser power)
 /// Hardware-based precise timing using DDS phase accumulator
