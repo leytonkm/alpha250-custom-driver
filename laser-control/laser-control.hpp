@@ -494,6 +494,40 @@ class CurrentRamp
         return !get_dma_error() && streaming_active;
     }
 
+    std::vector<float> read_adc_buffer_chunk(uint32_t offset, uint32_t size) {
+        if (!streaming_active) {
+            return {};
+        }
+
+        const uint32_t total_buffer_samples = n_desc * n_pts;
+
+        if (size > total_buffer_samples) {
+            size = total_buffer_samples;
+        }
+
+        std::vector<float> result;
+        result.reserve(size);
+
+        for (uint32_t i = 0; i < size; ++i) {
+            uint32_t buffer_idx = (offset + i) % total_buffer_samples;
+
+            uint32_t sample_byte_offset = buffer_idx * 2;
+            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
+            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
+
+            uint16_t raw_data = (sample_byte_offset % 4 == 0)
+                                    ? (word32 & 0xFFFF)
+                                    : (word32 >> 16);
+
+            int16_t adc_signed = static_cast<int16_t>(raw_data);
+            // Use empirically corrected scaling factor for CIC filter gain from get_adc_stream_voltages
+            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+            result.push_back(voltage);
+        }
+
+        return result;
+    }
+
     // === TEST FUNCTIONS ===
     // For precision DAC testing - direct voltage control on all channels
     
