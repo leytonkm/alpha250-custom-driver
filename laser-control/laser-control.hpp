@@ -508,6 +508,13 @@ class CurrentRamp
         std::vector<float> result;
         result.reserve(size);
 
+        // This scaling factor is chosen to match the previous implementation, which was
+        // empirically found to be closer to correct. The CIC filter's gain correction
+        // appears to be over-attenuating the signal, so this compensates for it.
+        // The factor corresponds to a 16-bit ADC with a 1.0 Vpp range (0.5 / 32768.0f)
+        // and an additional multiplier of 1.25 (or division by 0.8) to correct the amplitude.
+        const float scaling_factor = 1.0f / 13107.2f;
+
         for (uint32_t i = 0; i < size; ) {
             uint32_t buffer_idx = (offset + i) % total_buffer_samples;
 
@@ -515,8 +522,7 @@ class CurrentRamp
             if (buffer_idx % 2 != 0) {
                 uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
                 int16_t adc_signed = static_cast<int16_t>(word32 >> 16);
-                float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
-                result.push_back(voltage);
+                result.push_back(static_cast<float>(adc_signed) * scaling_factor);
                 i++;
                 continue;
             }
@@ -526,16 +532,14 @@ class CurrentRamp
 
             // First sample (lower 16 bits)
             int16_t adc_signed1 = static_cast<int16_t>(word32 & 0xFFFF);
-            float voltage1 = (static_cast<float>(adc_signed1) / 13107.2f) * 0.5f;
-            result.push_back(voltage1);
+            result.push_back(static_cast<float>(adc_signed1) * scaling_factor);
             i++;
 
             if (i >= size) break;
 
             // Second sample (upper 16 bits)
             int16_t adc_signed2 = static_cast<int16_t>(word32 >> 16);
-            float voltage2 = (static_cast<float>(adc_signed2) / 13107.2f) * 0.5f;
-            result.push_back(voltage2);
+            result.push_back(static_cast<float>(adc_signed2) * scaling_factor);
             i++;
         }
 
@@ -660,6 +664,9 @@ class CurrentRamp
         std::vector<float> result(num_samples);
         ctx.log<INFO>("Reading %u fresh samples from DMA circular buffer...", num_samples);
 
+        // Revert to the previous scaling factor which was empirically more accurate.
+        const float scaling_factor = 1.0f / 13107.2f;
+
         // 4. Read the data block, with improved efficiency
         for (uint32_t i = 0; i < num_samples; ) {
             uint32_t buffer_idx = (start_sample_in_buffer + i) % total_buffer_samples;
@@ -668,7 +675,7 @@ class CurrentRamp
             if (buffer_idx % 2 != 0) {
                 uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
                 int16_t adc_signed = static_cast<int16_t>(word32 >> 16);
-                result[i] = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+                result[i] = static_cast<float>(adc_signed) * scaling_factor;
                 i++;
                 continue;
             }
@@ -678,14 +685,14 @@ class CurrentRamp
 
             // First sample (lower 16 bits)
             int16_t adc_signed1 = static_cast<int16_t>(word32 & 0xFFFF);
-            result[i] = (static_cast<float>(adc_signed1) / 13107.2f) * 0.5f;
+            result[i] = static_cast<float>(adc_signed1) * scaling_factor;
             i++;
 
             if (i >= num_samples) break;
 
             // Second sample (upper 16 bits)
             int16_t adc_signed2 = static_cast<int16_t>(word32 >> 16);
-            result[i] = (static_cast<float>(adc_signed2) / 13107.2f) * 0.5f;
+            result[i] = static_cast<float>(adc_signed2) * scaling_factor;
             i++;
         }
 
