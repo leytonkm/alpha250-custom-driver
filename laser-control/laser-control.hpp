@@ -508,21 +508,35 @@ class CurrentRamp
         std::vector<float> result;
         result.reserve(size);
 
-        for (uint32_t i = 0; i < size; ++i) {
+        for (uint32_t i = 0; i < size; ) {
             uint32_t buffer_idx = (offset + i) % total_buffer_samples;
 
-            uint32_t sample_byte_offset = buffer_idx * 2;
-            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
-            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
+            // If the buffer index is odd, we are unaligned. Read the single sample and continue.
+            if (buffer_idx % 2 != 0) {
+                uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
+                int16_t adc_signed = static_cast<int16_t>(word32 >> 16);
+                float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+                result.push_back(voltage);
+                i++;
+                continue;
+            }
 
-            uint16_t raw_data = (sample_byte_offset % 4 == 0)
-                                    ? (word32 & 0xFFFF)
-                                    : (word32 >> 16);
+            // Aligned read, process two samples from one 32-bit word
+            uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
 
-            int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use empirically corrected scaling factor for CIC filter gain from get_adc_stream_voltages
-            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
-            result.push_back(voltage);
+            // First sample (lower 16 bits)
+            int16_t adc_signed1 = static_cast<int16_t>(word32 & 0xFFFF);
+            float voltage1 = (static_cast<float>(adc_signed1) / 13107.2f) * 0.5f;
+            result.push_back(voltage1);
+            i++;
+
+            if (i >= size) break;
+
+            // Second sample (upper 16 bits)
+            int16_t adc_signed2 = static_cast<int16_t>(word32 >> 16);
+            float voltage2 = (static_cast<float>(adc_signed2) / 13107.2f) * 0.5f;
+            result.push_back(voltage2);
+            i++;
         }
 
         return result;
@@ -646,23 +660,33 @@ class CurrentRamp
         std::vector<float> result(num_samples);
         ctx.log<INFO>("Reading %u fresh samples from DMA circular buffer...", num_samples);
 
-        // 4. Read the data block, unpacking each 16-bit sample correctly.
-        for (uint32_t i = 0; i < num_samples; i++) {
+        // 4. Read the data block, with improved efficiency
+        for (uint32_t i = 0; i < num_samples; ) {
             uint32_t buffer_idx = (start_sample_in_buffer + i) % total_buffer_samples;
             
-            // Correctly unpack 16-bit sample from 64-bit DMA bus accessed via 32-bit reads.
-            uint32_t sample_byte_offset = buffer_idx * 2;
-            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
-            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
-            
-            uint16_t raw_data = (sample_byte_offset % 4 == 0)
-                                    ? (word32 & 0xFFFF)
-                                    : (word32 >> 16);
+            // If the buffer index is odd, we are unaligned. Read the single sample and continue.
+            if (buffer_idx % 2 != 0) {
+                uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
+                int16_t adc_signed = static_cast<int16_t>(word32 >> 16);
+                result[i] = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+                i++;
+                continue;
+            }
 
-            int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use empirically corrected scaling factor for CIC filter gain
-            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
-            result[i] = voltage;
+            // Aligned read, process two samples from one 32-bit word
+            uint32_t word32 = ram_s2mm.read_reg(buffer_idx / 2 * 4);
+
+            // First sample (lower 16 bits)
+            int16_t adc_signed1 = static_cast<int16_t>(word32 & 0xFFFF);
+            result[i] = (static_cast<float>(adc_signed1) / 13107.2f) * 0.5f;
+            i++;
+
+            if (i >= num_samples) break;
+
+            // Second sample (upper 16 bits)
+            int16_t adc_signed2 = static_cast<int16_t>(word32 >> 16);
+            result[i] = (static_cast<float>(adc_signed2) / 13107.2f) * 0.5f;
+            i++;
         }
 
         ctx.log<INFO>("Data retrieval complete.");
