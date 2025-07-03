@@ -86,8 +86,7 @@ class DataWorker(QtCore.QThread):
         self.samples_per_update = samples_per_update
         # Initialise read pointer a few descriptors behind the current write pointer
         self.safe_lag_desc = 8  # stay several descriptors behind write head for safety (≈16 ms @ 100 kS/s)
-        current_write = driver.get_buffer_position()
-        self.read_ptr = (current_write - self.safe_lag_desc * self.n_pts) % (self.n_desc * self.n_pts)
+        self.read_ptr = 0  # will be set after warm-up
         self.samples_to_collect = samples_to_collect
         self.samples_collected = 0
 
@@ -112,9 +111,9 @@ class DataWorker(QtCore.QThread):
                     self.read_ptr = (self.read_ptr + read_size) % self.total_buffer_size
                 time.sleep(0.02) # Don't hog the CPU while waiting
             
-            # After warm-up, reposition the read pointer the same safe distance behind
-            # the DMA writer to avoid touching an in-flight descriptor.
-            self.read_ptr = (self.driver.get_buffer_position() - self.safe_lag_desc * self.n_pts) % self.total_buffer_size
+            # After warm-up, synchronise read pointer safe distance behind current write pointer
+            write_ptr = self.driver.get_buffer_position()
+            self.read_ptr = (write_ptr - self.safe_lag_desc * self.n_pts + self.total_buffer_size) % self.total_buffer_size
             self.status_changed.emit(f"Starting acquisition at sample index {self.read_ptr}")
 
             while self.running:
@@ -123,10 +122,9 @@ class DataWorker(QtCore.QThread):
                 write_ptr = self.driver.get_buffer_position()
                 samples_available = (write_ptr - self.read_ptr + self.total_buffer_size) % self.total_buffer_size
 
-                # Keep a safety margin so we never overrun the writer.
+                # Keep a safety margin so we never overrun the DMA writer.
                 safe_margin_samples = self.safe_lag_desc * self.n_pts
                 if samples_available <= safe_margin_samples:
-                    # Not enough fresh data yet; try again next cycle
                     samples_available = 0
                 else:
                     samples_available -= safe_margin_samples
@@ -160,8 +158,12 @@ class DataWorker(QtCore.QThread):
         except Exception as e:
             self.status_changed.emit(f"Error in worker: {e}")
         finally:
-            if self.running: # Ensure streaming is stopped if loop breaks unexpectedly
+            # Always stop ADC streaming at the end of a worker run to leave the hardware in a
+            # defined state for the next acquisition.
+            try:
                 self.driver.stop_adc_streaming()
+            except Exception:
+                pass
             self.status_changed.emit("ADC streaming stopped.")
             self.finished.emit()
 
@@ -248,12 +250,12 @@ class MainWindow(QtWidgets.QMainWindow):
         run_layout.addWidget(QtWidgets.QLabel("Rate:"), 1, 0)
         self.rate_spinbox = QtWidgets.QSpinBox()
         self.rate_spinbox.setRange(1, 1000)  # 1 kS/s to 1 MS/s
-        self.rate_spinbox.setSuffix(" kS/s")
+        self.rate_spinbox.setSuffix(" kHz")
         self.rate_spinbox.setValue(100)  # default 100 kS/s
         run_layout.addWidget(self.rate_spinbox, 1, 1)
         self.run_button = QtWidgets.QPushButton("Start Run")
         run_layout.addWidget(self.run_button, 2, 0, 1, 2)
-        self.effective_rate_label = QtWidgets.QLabel("Rate: -- kS/s")
+        self.effective_rate_label = QtWidgets.QLabel("Rate: -- kHz")
         self.effective_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         run_layout.addWidget(self.effective_rate_label, 3, 0, 1, 2)
         self.run_progress_bar = QtWidgets.QProgressBar()
@@ -446,17 +448,19 @@ class MainWindow(QtWidgets.QMainWindow):
         max_duration = MAX_VISIBLE_SAMPLES / desired_rate
         if self.run_duration > max_duration:
             QtWidgets.QMessageBox.warning(self, "Duration too long", 
-                f"At {desired_rate_k} kS/s the maximum duration is {max_duration:.2f} s.")
+                f"At {desired_rate_k} kHz the maximum duration is {max_duration:.2f} s.")
             return
 
         self.driver.set_decimation_rate(dec_rate)
         self.sample_rate = self.driver.get_decimated_sample_rate()
-        self.effective_rate_label.setText(f"Rate: {self.sample_rate/1e3:.1f} kS/s  |  Max {max_duration:.2f} s")
+        self.effective_rate_label.setText(f"Rate: {self.sample_rate/1e3:.1f} kHz  |  Max {max_duration:.2f} s")
         self.is_fixed_run = True
         self.run_duration = self.duration_spinbox.value()
-        samples_to_collect = int(self.run_duration * self.sample_rate)
+        visible_samples = math.ceil(self.run_duration * self.sample_rate)
+        self.target_visible_samples = visible_samples  # for trimming at the end
         guard = 8 * 2048  # safe lag (8 descriptors) * samples per descriptor
-        samples_to_collect += guard
+        self.current_guard = guard  # remember for post-processing
+        samples_to_collect = visible_samples + guard
         
         self.start_button.setEnabled(False)
         self.run_button.setEnabled(False)
@@ -506,18 +510,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ts_group_box.setEnabled(True)
 
         if self.is_fixed_run:
-            # Re-calibrate sample rate from actual number of samples captured
-            if self.run_duration > 0 and self.total_samples_received > 0:
-                new_rate = self.total_samples_received / self.run_duration
-                # Accept new rate if it differs by more than 1 %
+            # Remove guard samples from analysis
+            guard = getattr(self, 'current_guard', 0)
+            target = getattr(self, 'target_visible_samples', None)
+            visible_samples = max(0, self.total_samples_received - guard)
+            if target is not None and visible_samples > target:
+                visible_samples = target  # trim overshoot
+
+            # Re-calibrate sample rate from actual number of visible samples
+            if self.run_duration > 0 and visible_samples > 0:
+                new_rate = visible_samples / self.run_duration
+                # Update stored sample_rate if it changed noticeably
                 if abs(new_rate - self.sample_rate) / self.sample_rate > 0.01:
                     self.sample_rate = new_rate
-                    # Re-compute the x-axis and refresh the plot for accuracy
-                    x_data = np.linspace(1 / self.sample_rate, self.run_duration, self.total_samples_received)
-                    y_data = self.voltage_buffer[:self.total_samples_received]
-                    self.plot_curve.setData(x=x_data, y=y_data)
+                # Always refresh the final plot with precisely trimmed data
+                x_data = np.linspace(0, self.run_duration, visible_samples, endpoint=False)
+                y_data = self.voltage_buffer[:visible_samples]
+                self.plot_curve.setData(x=x_data, y=y_data)
 
-            self.status_bar.showMessage(f"Run of {self.run_duration}s finished. {self.total_samples_received} samples collected.")
+            # Reset X axis with a small right-hand margin for visual comfort
+            self.plot_widget.setXRange(0, self.run_duration, padding=0.05)
+
+            self.status_bar.showMessage(f"Run of {self.run_duration}s finished. {visible_samples} samples collected.")
             self.run_progress_bar.setValue(100)
         else:
              self.status_bar.showMessage("Streaming stopped.")
@@ -532,7 +546,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.driver.set_decimation_rate(dec_rate)
             self.sample_rate = self.driver.get_decimated_sample_rate()
         self.plot_curve.setData(x=[], y=[])
-        self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kS/s)")
+        self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kHz)")
 
     @QtCore.pyqtSlot(np.ndarray)
     def update_plot(self, new_data):
