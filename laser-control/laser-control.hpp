@@ -44,8 +44,9 @@ namespace Sclr_regs {
 }
 
 // DMA streaming parameters
-constexpr uint32_t n_pts = 64 * 1024; // Number of words in one descriptor
-constexpr uint32_t n_desc = 64; // Number of descriptors
+#define LASER_CONTROL_N_PTS 2048
+constexpr uint32_t n_pts = LASER_CONTROL_N_PTS;      // Number of 16-bit samples per descriptor (≈20 ms @ 100 kS/s)
+constexpr uint32_t n_desc = 512; // Number of descriptors (32 KiB descriptor list)
 
 class CurrentRamp
 {
@@ -327,10 +328,8 @@ class CurrentRamp
             return;
         }
         
-        // Clear RAM buffer
-        for (uint32_t i = 0; i < n_pts * n_desc; i++) {
-            ram_s2mm.write_reg(4*i, 0);
-        }
+        // Buffer is circular and will be overwritten by DMA.  No need to pre-clear it here – doing so
+        // saved >100 ms but produced a blank gap at the start of every acquisition.
         
         // Set up descriptors and start DMA (following adc-dac-dma exactly)
         set_descriptors();
@@ -520,7 +519,7 @@ class CurrentRamp
                                     : (word32 >> 16);
 
             int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use empirically corrected scaling factor for CIC filter gain from get_adc_stream_voltages
+            // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
             float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
             result.push_back(voltage);
         }
@@ -599,8 +598,8 @@ class CurrentRamp
         // ADC delivers 14-bit two's-complement data, sign-extended to 16 bits by FPGA
         // Range: −8192 … +8191  →  −0.5 V … +0.5 V (1 Vpp)
         int16_t adc_signed = static_cast<int16_t>(adc_raw & 0xFFFF);
-        // Correct for 14-bit ADC with range ±0.5V
-        float voltage = (static_cast<float>(adc_signed) / 8192.0f) * 0.5f;
+        // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
+        float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
         return voltage;
     }
     
@@ -660,7 +659,7 @@ class CurrentRamp
                                     : (word32 >> 16);
 
             int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use empirically corrected scaling factor for CIC filter gain
+            // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
             float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
             result[i] = voltage;
         }

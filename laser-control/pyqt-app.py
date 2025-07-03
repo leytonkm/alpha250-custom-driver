@@ -7,15 +7,32 @@ import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from koheron import connect, command
+import math
 
 # --- Constants ---
 APP_TITLE = "Laser Control - Live ADC Scope"
 DEFAULT_HOST = os.environ.get('HOST', '192.168.1.20')
 INSTRUMENT_NAME = 'laser-control'
 
-# Performance settings
-UPDATE_INTERVAL_MS = 50  # Update plot every 50 ms (20 FPS)
-SAMPLES_PER_UPDATE = 5000 # Fetch 50 ms of data per update (5000 samples @ 100 kHz)
+# Performance settings (values will be refined after connecting to instrument)
+UPDATE_INTERVAL_MS = 50  # Target plot refresh period (ms)
+
+# The effective number of samples read each update will be computed dynamically
+# once we know the decimated sample-rate. 5–10× the descriptor length ensures
+# we drain the DMA buffer even if the GUI stalls for one frame.
+DEFAULT_SAMPLES_PER_UPDATE = 10000
+
+# Maximum number of visible samples for any capture
+MAX_VISIBLE_SAMPLES = 1_000_000  # 1 Mpts, fits comfortably in 16-MiB buffer
+
+def compute_decimation(run_seconds: float) -> int:
+    """Return a CIC decimation rate that keeps visible samples ≤ MAX_VISIBLE_SAMPLES."""
+    FS_ADC = 250_000_000  # 250 MHz, defined in config.yml
+    target_rate = FS_ADC * run_seconds / MAX_VISIBLE_SAMPLES
+    dec_rate = math.ceil(target_rate)
+    if dec_rate < 2500:
+        dec_rate = 2500  # 100 kS/s upper limit
+    return min(dec_rate, 8192)
 
 # --- Driver Interface ---
 class CurrentRamp:
@@ -41,6 +58,10 @@ class CurrentRamp:
     def get_decimated_sample_rate(self):
         return self.client.recv_double()
 
+    @command('CurrentRamp')
+    def set_decimation_rate(self, rate):
+        pass
+
 # --- Data Acquisition Thread ---
 
 class DataWorker(QtCore.QThread):
@@ -54,12 +75,19 @@ class DataWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal()
     progress_updated = QtCore.pyqtSignal(int) # For fixed-duration runs
 
-    def __init__(self, driver, samples_to_collect=None):
+    def __init__(self, driver, samples_per_update=DEFAULT_SAMPLES_PER_UPDATE, samples_to_collect=None):
         super(DataWorker, self).__init__()
         self.driver = driver
         self.running = False
-        self.total_buffer_size = 0
-        self.read_ptr = 0
+        # DMA buffer configuration – keep in sync with firmware & C++ driver
+        self.n_desc = 512  # Matches C++ driver
+        self.n_pts  = 2048  # 512 × 64-bit words per descriptor → 20.48 ms @ 100 kS/s
+        self.total_buffer_size = self.n_desc * self.n_pts
+        self.samples_per_update = samples_per_update
+        # Initialise read pointer a few descriptors behind the current write pointer
+        self.safe_lag_desc = 8  # stay several descriptors behind write head for safety (≈16 ms @ 100 kS/s)
+        current_write = driver.get_buffer_position()
+        self.read_ptr = (current_write - self.safe_lag_desc * self.n_pts) % (self.n_desc * self.n_pts)
         self.samples_to_collect = samples_to_collect
         self.samples_collected = 0
 
@@ -68,10 +96,6 @@ class DataWorker(QtCore.QThread):
         try:
             self.status_changed.emit("Worker thread started")
             self.running = True
-
-            n_desc = 64
-            n_pts = 64 * 1024
-            self.total_buffer_size = n_desc * n_pts
 
             self.driver.start_adc_streaming()
             
@@ -82,12 +106,15 @@ class DataWorker(QtCore.QThread):
                 write_ptr = self.driver.get_buffer_position()
                 samples_available = (write_ptr - self.read_ptr + self.total_buffer_size) % self.total_buffer_size
                 if samples_available > 0:
-                    read_size = min(samples_available, SAMPLES_PER_UPDATE)
+                    read_size = min(samples_available, self.samples_per_update)
                     # Read data to advance our pointer, but do nothing with the returned data
                     _ = self.driver.read_adc_buffer_chunk(self.read_ptr, read_size)
                     self.read_ptr = (self.read_ptr + read_size) % self.total_buffer_size
                 time.sleep(0.02) # Don't hog the CPU while waiting
             
+            # After warm-up, reposition the read pointer the same safe distance behind
+            # the DMA writer to avoid touching an in-flight descriptor.
+            self.read_ptr = (self.driver.get_buffer_position() - self.safe_lag_desc * self.n_pts) % self.total_buffer_size
             self.status_changed.emit(f"Starting acquisition at sample index {self.read_ptr}")
 
             while self.running:
@@ -96,8 +123,16 @@ class DataWorker(QtCore.QThread):
                 write_ptr = self.driver.get_buffer_position()
                 samples_available = (write_ptr - self.read_ptr + self.total_buffer_size) % self.total_buffer_size
 
+                # Keep a safety margin so we never overrun the writer.
+                safe_margin_samples = self.safe_lag_desc * self.n_pts
+                if samples_available <= safe_margin_samples:
+                    # Not enough fresh data yet; try again next cycle
+                    samples_available = 0
+                else:
+                    samples_available -= safe_margin_samples
+
                 if samples_available > 0:
-                    read_size = min(samples_available, SAMPLES_PER_UPDATE)
+                    read_size = min(samples_available, self.samples_per_update)
                     
                     if self.samples_to_collect is not None:
                         remaining = self.samples_to_collect - self.samples_collected
@@ -199,19 +234,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Fixed Run Controls ---
         run_group_box = QtWidgets.QGroupBox("Fixed-Duration Run")
         run_layout = QtWidgets.QGridLayout()
+        # Duration control
         run_layout.addWidget(QtWidgets.QLabel("Duration:"), 0, 0)
         self.duration_spinbox = QtWidgets.QDoubleSpinBox()
-        self.duration_spinbox.setRange(0.000001, 10.0)
-        self.duration_spinbox.setDecimals(6)
+        self.duration_spinbox.setRange(0.0001, 60.0)
+        self.duration_spinbox.setDecimals(3)
         self.duration_spinbox.setSingleStep(0.1)
         self.duration_spinbox.setSuffix(" s")
         self.duration_spinbox.setValue(1.0)
         run_layout.addWidget(self.duration_spinbox, 0, 1)
+
+        # Sample rate control (visible rate after decimation)
+        run_layout.addWidget(QtWidgets.QLabel("Rate:"), 1, 0)
+        self.rate_spinbox = QtWidgets.QSpinBox()
+        self.rate_spinbox.setRange(1, 1000)  # 1 kS/s to 1 MS/s
+        self.rate_spinbox.setSuffix(" kS/s")
+        self.rate_spinbox.setValue(100)  # default 100 kS/s
+        run_layout.addWidget(self.rate_spinbox, 1, 1)
         self.run_button = QtWidgets.QPushButton("Start Run")
-        run_layout.addWidget(self.run_button, 1, 0, 1, 2)
+        run_layout.addWidget(self.run_button, 2, 0, 1, 2)
+        self.effective_rate_label = QtWidgets.QLabel("Rate: -- kS/s")
+        self.effective_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        run_layout.addWidget(self.effective_rate_label, 3, 0, 1, 2)
         self.run_progress_bar = QtWidgets.QProgressBar()
         self.run_progress_bar.setTextVisible(False)
-        run_layout.addWidget(self.run_progress_bar, 2, 0, 1, 2)
+        run_layout.addWidget(self.run_progress_bar, 4, 0, 1, 2)
         run_group_box.setLayout(run_layout)
 
         # --- Locked Coordinate Display ---
@@ -259,9 +306,16 @@ class MainWindow(QtWidgets.QMainWindow):
         for val, radio in self.ts_radios.items():
             radio.toggled.connect(lambda checked, v=val: self.set_time_scale(v) if checked else None)
 
+        # Update max duration label dynamically
+        self.duration_spinbox.valueChanged.connect(self.update_max_duration)
+        self.rate_spinbox.valueChanged.connect(self.update_max_duration)
+
         # Connect plot interaction signals
         self.plot_widget.scene().sigMouseMoved.connect(self.update_crosshair)
         self.plot_widget.scene().sigMouseClicked.connect(self.plot_clicked)
+
+        # initialise max-duration label
+        QtCore.QTimer.singleShot(0, self.update_max_duration)
 
     def update_crosshair(self, pos):
         """Handle mouse movement on the plot for crosshair."""
@@ -360,8 +414,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_fixed_run = False
         self.run_button.setEnabled(False)
         self.duration_spinbox.setEnabled(False)
+        self.rate_spinbox.setEnabled(False)
         self.reset_and_clear_buffers()
-        self.data_worker = DataWorker(self.driver)
+        # Set decimation so that visible window fits MAX_VISIBLE_SAMPLES
+        dec_rate = compute_decimation(self.time_scale_s)
+        self.driver.set_decimation_rate(dec_rate)
+        self.sample_rate = self.driver.get_decimated_sample_rate()
+        # Use a read-chunk ≈10 % of the buffer or ≥50 ms of data, whichever is larger
+        samples_per_update = max(DEFAULT_SAMPLES_PER_UPDATE, int(0.1 * self.sample_rate))
+        self.data_worker = DataWorker(self.driver, samples_per_update=samples_per_update)
         self.connect_worker_signals()
         self.data_worker.start()
 
@@ -372,13 +433,35 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def start_fixed_run(self):
         """Start the data acquisition worker for a fixed duration."""
+        # Compute decimation from user-selected sample rate
+        desired_rate_k = self.rate_spinbox.value()
+        desired_rate = desired_rate_k * 1000
+        # Clamp to allowed range
+        if desired_rate <= 0:
+            desired_rate = 100000
+        dec_rate = math.ceil(250_000_000 / desired_rate)
+        dec_rate = max(10, min(8192, dec_rate))
+
+        # Check that requested duration fits in max points
+        max_duration = MAX_VISIBLE_SAMPLES / desired_rate
+        if self.run_duration > max_duration:
+            QtWidgets.QMessageBox.warning(self, "Duration too long", 
+                f"At {desired_rate_k} kS/s the maximum duration is {max_duration:.2f} s.")
+            return
+
+        self.driver.set_decimation_rate(dec_rate)
+        self.sample_rate = self.driver.get_decimated_sample_rate()
+        self.effective_rate_label.setText(f"Rate: {self.sample_rate/1e3:.1f} kS/s  |  Max {max_duration:.2f} s")
         self.is_fixed_run = True
         self.run_duration = self.duration_spinbox.value()
         samples_to_collect = int(self.run_duration * self.sample_rate)
+        guard = 8 * 2048  # safe lag (8 descriptors) * samples per descriptor
+        samples_to_collect += guard
         
         self.start_button.setEnabled(False)
         self.run_button.setEnabled(False)
         self.duration_spinbox.setEnabled(False)
+        self.rate_spinbox.setEnabled(False)
         self.ts_group_box.setEnabled(False)
         
         self.plot_widget.setXRange(0, self.run_duration)
@@ -386,7 +469,8 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.reset_and_clear_buffers()
         
-        self.data_worker = DataWorker(self.driver, samples_to_collect=samples_to_collect)
+        samples_per_update = max(DEFAULT_SAMPLES_PER_UPDATE, int(0.1 * self.sample_rate))
+        self.data_worker = DataWorker(self.driver, samples_per_update=samples_per_update, samples_to_collect=samples_to_collect)
         self.connect_worker_signals()
         self.data_worker.progress_updated.connect(self.run_progress_bar.setValue)
         self.data_worker.start()
@@ -418,21 +502,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button.setChecked(False)
         self.run_button.setEnabled(True)
         self.duration_spinbox.setEnabled(True)
+        self.rate_spinbox.setEnabled(True)
         self.ts_group_box.setEnabled(True)
 
         if self.is_fixed_run:
+            # Re-calibrate sample rate from actual number of samples captured
+            if self.run_duration > 0 and self.total_samples_received > 0:
+                new_rate = self.total_samples_received / self.run_duration
+                # Accept new rate if it differs by more than 1 %
+                if abs(new_rate - self.sample_rate) / self.sample_rate > 0.01:
+                    self.sample_rate = new_rate
+                    # Re-compute the x-axis and refresh the plot for accuracy
+                    x_data = np.linspace(1 / self.sample_rate, self.run_duration, self.total_samples_received)
+                    y_data = self.voltage_buffer[:self.total_samples_received]
+                    self.plot_curve.setData(x=x_data, y=y_data)
+
             self.status_bar.showMessage(f"Run of {self.run_duration}s finished. {self.total_samples_received} samples collected.")
             self.run_progress_bar.setValue(100)
         else:
              self.status_bar.showMessage("Streaming stopped.")
     
     @QtCore.pyqtSlot(float)
-    @QtCore.pyqtSlot(float)
     def set_time_scale(self, scale_s):
         """Update the visible time window."""
         self.time_scale_s = scale_s
+        # Update decimation only if in live-streaming mode (worker running & not fixed run)
+        if self.data_worker and not self.is_fixed_run:
+            dec_rate = compute_decimation(self.time_scale_s)
+            self.driver.set_decimation_rate(dec_rate)
+            self.sample_rate = self.driver.get_decimated_sample_rate()
         self.plot_curve.setData(x=[], y=[])
-        self.status_bar.showMessage(f"Time scale set to {scale_s}s")
+        self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kS/s)")
 
     @QtCore.pyqtSlot(np.ndarray)
     def update_plot(self, new_data):
@@ -481,6 +581,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.data_worker:
             self.data_worker.stop()
         event.accept()
+
+    def update_max_duration(self):
+        desired_rate_k = self.rate_spinbox.value()
+        desired_rate = desired_rate_k * 1000
+        max_duration = MAX_VISIBLE_SAMPLES / desired_rate if desired_rate > 0 else 0
+        self.effective_rate_label.setText(f"Max T: {max_duration:.2f} s")
 
 def main():
     """Main function to run the application."""

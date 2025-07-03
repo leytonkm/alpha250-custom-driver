@@ -250,8 +250,8 @@ cell xilinx.com:ip:axis_clock_converter:1.1 axis_clock_converter_0 {
 # Packet generator for DMA transfers
 cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
   TDATA_WIDTH 64
-  # Shorter packet (16 384 × 64-bit words ≈ 0.16 s at 100 kS/s)
-  PKT_LENGTH 16384
+  # Shorter packet (~20 ms at 100 kS/s): 512 × 64-bit words = 2048 samples
+  PKT_LENGTH 512
 } {
   aclk ps_0/FCLK_CLK0
   resetn proc_sys_reset_0/peripheral_aresetn
