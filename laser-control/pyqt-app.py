@@ -23,7 +23,9 @@ UPDATE_INTERVAL_MS = 50  # Target plot refresh period (ms)
 DEFAULT_SAMPLES_PER_UPDATE = 10000
 
 # Maximum number of visible samples for any capture
-MAX_VISIBLE_SAMPLES = 1_000_000  # 1 Mpts, fits comfortably in 16-MiB buffer
+MAX_VISIBLE_SAMPLES = 1_000_000  # 1 Mpts
+# Safety factor to ensure we over-capture slightly so slow clock doesn't truncate
+SAFETY_FACTOR = 1.03  # 3 % head-room
 
 def compute_decimation(run_seconds: float) -> int:
     """Return a CIC decimation rate that keeps visible samples ≤ MAX_VISIBLE_SAMPLES."""
@@ -62,9 +64,81 @@ class CurrentRamp:
     def set_decimation_rate(self, rate):
         pass
 
+# --- Live Window Worker (infinite rolling oscilloscope) ---
+
+class LiveWorker(QtCore.QThread):
+    """Continuously fetch the last `window_seconds` of data each refresh."""
+    window_ready = QtCore.pyqtSignal(np.ndarray)
+    status_changed = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, driver, sample_rate, window_seconds, guard_pts, refresh_ms=UPDATE_INTERVAL_MS):
+        super().__init__()
+        self.driver = driver
+        self.sample_rate = sample_rate
+        self.window_pts = int(window_seconds * sample_rate)
+        self.guard_pts = guard_pts
+        self.refresh_ms = refresh_ms
+
+        # DMA ring params – keep in sync with firmware
+        self.n_desc = 512
+        self.n_pts = 2048
+        self.total_buffer_size = self.n_desc * self.n_pts
+
+        self.running = False
+
+    def run(self):
+        try:
+            self.driver.start_adc_streaming()
+            self.running = True
+            self.status_changed.emit("LiveWorker started")
+
+            # Initialize read pointer safe distance behind writer
+            write_ptr = self.driver.get_buffer_position()
+            self.safe_lag_desc = 8  # same as GUI
+            self.read_ptr = (write_ptr - self.safe_lag_desc * self.n_pts + self.total_buffer_size) % self.total_buffer_size
+
+            while self.running:
+                loop_start = time.time()
+
+                write_ptr = self.driver.get_buffer_position()
+                samples_available = (write_ptr - self.read_ptr + self.total_buffer_size) % self.total_buffer_size
+
+                # ensure we don't catch descriptor being written
+                safe_margin = self.safe_lag_desc * self.n_pts
+                if samples_available <= safe_margin:
+                    samples_available = 0
+                else:
+                    samples_available -= safe_margin
+
+                if samples_available > 0:
+                    read_size = min(samples_available, DEFAULT_SAMPLES_PER_UPDATE)
+                    data = np.array(
+                        self.driver.read_adc_buffer_chunk(self.read_ptr, read_size), dtype=np.float32)
+                    if data.size > 0:
+                        self.window_ready.emit(data)
+                        self.read_ptr = (self.read_ptr + data.size) % self.total_buffer_size
+
+                elapsed = (time.time() - loop_start) * 1000
+                time.sleep(max(0, self.refresh_ms - elapsed) / 1000)
+
+        except Exception as e:
+            self.status_changed.emit(f"LiveWorker error: {e}")
+        finally:
+            try:
+                self.driver.stop_adc_streaming()
+            except Exception:
+                pass
+            self.status_changed.emit("LiveWorker stopped")
+            self.finished.emit()
+
+    def stop(self):
+        self.running = False
+        # The finally block in run() will handle stopping the stream
+
 # --- Data Acquisition Thread ---
 
-class DataWorker(QtCore.QThread):
+class RunWorker(QtCore.QThread):
     """
     Worker thread for acquiring ADC data from the instrument.
     Decouples data acquisition from the GUI to prevent freezing.
@@ -76,7 +150,7 @@ class DataWorker(QtCore.QThread):
     progress_updated = QtCore.pyqtSignal(int) # For fixed-duration runs
 
     def __init__(self, driver, samples_per_update=DEFAULT_SAMPLES_PER_UPDATE, samples_to_collect=None):
-        super(DataWorker, self).__init__()
+        super(RunWorker, self).__init__()
         self.driver = driver
         self.running = False
         # DMA buffer configuration – keep in sync with firmware & C++ driver
@@ -169,7 +243,7 @@ class DataWorker(QtCore.QThread):
 
     def stop(self):
         self.running = False
-        self.driver.stop_adc_streaming()
+        # The finally block in run() will handle stopping the stream
 
 # --- Main Application Window ---
 
@@ -180,16 +254,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, driver):
         super(MainWindow, self).__init__()
         self.driver = driver
-        self.data_worker = None
+        self.run_worker = None
+        self.live_worker = None
 
         # --- Data Buffers ---
         self.time_scale_s = 5.0 # Default time window to display
         self.sample_rate = self.driver.get_decimated_sample_rate()
         
-        self.max_plot_points = int(10.0 * self.sample_rate)
-        self.time_buffer = np.zeros(self.max_plot_points)
-        self.voltage_buffer = np.zeros(self.max_plot_points)
+        # Allocate live buffers sized to current time window plus safety margin
+        self.resize_live_buffers()
         self.buffer_ptr = 0
+        self.sample_clock = 0  # 64-bit counter of total samples received
         self.last_time = 0.0
         self.total_samples_received = 0
         self.is_fixed_run = False
@@ -201,6 +276,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.set_time_scale(self.time_scale_s)
         self.status_bar.showMessage("Ready. Connect to an instrument and start streaming.")
+
+    # ------------------------------------------------------------------
+    # Dynamic buffer allocation for rolling oscilloscope view
+    # ------------------------------------------------------------------
+    def resize_live_buffers(self):
+        """Allocate circular buffers sized for the current time window."""
+        # Visible points in the window
+        visible_pts = int(self.time_scale_s * self.sample_rate)
+        # Add guard margin (8 DMA descriptors)
+        guard_pts = 8 * 2048
+        total_pts = visible_pts + guard_pts
+
+        self.max_plot_points = total_pts
+        self.time_buffer = np.zeros(total_pts, dtype=np.float32)
+        self.voltage_buffer = np.zeros(total_pts, dtype=np.float32)
 
     def setup_ui(self):
         """Initialize UI elements."""
@@ -217,9 +307,9 @@ class MainWindow(QtWidgets.QMainWindow):
         control_panel.setFixedWidth(250)
 
         # --- Live Streaming Controls ---
-        streaming_group_box = QtWidgets.QGroupBox("Live Streaming")
+        streaming_group_box = QtWidgets.QGroupBox("Live View")
         streaming_layout = QtWidgets.QVBoxLayout()
-        self.start_button = QtWidgets.QPushButton("Start Streaming")
+        self.start_button = QtWidgets.QPushButton("Enable Live View")
         self.start_button.setCheckable(True)
         self.ts_group_box = QtWidgets.QGroupBox("Time Scale")
         ts_layout = QtWidgets.QVBoxLayout()
@@ -230,6 +320,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ts_radios[self.time_scale_s].setChecked(True)
         self.ts_group_box.setLayout(ts_layout)
         streaming_layout.addWidget(self.start_button)
+        # Freeze checkbox
+        self.freeze_checkbox = QtWidgets.QCheckBox("Freeze")
+        streaming_layout.addWidget(self.freeze_checkbox)
         streaming_layout.addWidget(self.ts_group_box)
         streaming_group_box.setLayout(streaming_layout)
 
@@ -274,9 +367,21 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(streaming_group_box)
         control_layout.addWidget(run_group_box)
         control_layout.addWidget(locked_coord_group)
-        control_layout.addStretch()
+        # --- Live Statistics Display ---
+        stats_group = QtWidgets.QGroupBox("Live Stats (visible window)")
+        stats_layout = QtWidgets.QVBoxLayout()
+        self.stats_label = QtWidgets.QLabel("min: -- V\nmax: -- V\nRMS: -- V\nP2P: -- V")
+        self.stats_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        stats_layout.addWidget(self.stats_label)
+        stats_group.setLayout(stats_layout)
 
-        # --- Plotting Area ---
+        control_layout.addStretch()
+        control_layout.addWidget(stats_group)
+
+        # --- Plotting Areas ---
+        plots_container = QtWidgets.QVBoxLayout()
+
+        # Live plot (top)
         self.plot_widget = pg.PlotWidget()
         self.plot_curve = self.plot_widget.plot(pen=pg.mkPen('b', width=2))
         self.plot_curve.setDownsampling(auto=True)
@@ -286,7 +391,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setYRange(-0.5, 0.5)
 
-        # --- Desmos-style Hover Elements ---
+        # --- Desmos-style Hover Elements (live plot only) ---
         self.hover_marker = pg.ScatterPlotItem([], [], pxMode=True, size=10, pen=pg.mkPen('w'), brush=pg.mkBrush(255, 255, 255, 120))
         self.locked_marker = pg.ScatterPlotItem([], [], pxMode=True, size=12, pen=pg.mkPen('w'), brush=pg.mkBrush('b'))
         self.coord_text = pg.TextItem(text='', color=(200, 200, 200), anchor=(-0.1, 1.2))
@@ -295,7 +400,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.addItem(self.locked_marker)
         self.plot_widget.addItem(self.coord_text)
         
-        main_layout.addWidget(self.plot_widget)
+        plots_container.addWidget(self.plot_widget)
+
+        # Run plot (bottom) hidden until a fixed run completes
+        self.run_plot_widget = pg.PlotWidget()
+        self.run_plot_curve = self.run_plot_widget.plot(pen=pg.mkPen('g', width=2))
+        self.run_plot_widget.setLabel('bottom', "Run Time", units='s')
+        self.run_plot_widget.setLabel('left', "Voltage", units='V')
+        self.run_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.run_plot_widget.setVisible(False)
+
+        plots_container.addWidget(self.run_plot_widget)
+
+        main_layout.addLayout(plots_container)
         main_layout.addWidget(control_panel)
 
         # --- Status Bar ---
@@ -412,27 +529,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_button.setText("Start Streaming")
 
     def start_streaming(self):
-        """Start the data acquisition worker for live streaming."""
+        """Start the live acquisition worker."""
         self.is_fixed_run = False
-        self.run_button.setEnabled(False)
-        self.duration_spinbox.setEnabled(False)
-        self.rate_spinbox.setEnabled(False)
+        self.run_button.setEnabled(False)  # Disable run button
         self.reset_and_clear_buffers()
-        # Set decimation so that visible window fits MAX_VISIBLE_SAMPLES
+        
         dec_rate = compute_decimation(self.time_scale_s)
         self.driver.set_decimation_rate(dec_rate)
         self.sample_rate = self.driver.get_decimated_sample_rate()
-        # Use a read-chunk ≈10 % of the buffer or ≥50 ms of data, whichever is larger
-        samples_per_update = max(DEFAULT_SAMPLES_PER_UPDATE, int(0.1 * self.sample_rate))
-        self.data_worker = DataWorker(self.driver, samples_per_update=samples_per_update)
-        self.connect_worker_signals()
-        self.data_worker.start()
+        
+        self.resize_live_buffers() # Ensure buffers are sized for this view
+
+        guard_pts = 8 * 2048
+        self.live_worker = LiveWorker(self.driver, self.sample_rate, self.time_scale_s, guard_pts)
+        self.live_worker.window_ready.connect(self.update_live_plot)
+        self.live_worker.status_changed.connect(self.status_bar.showMessage)
+        self.live_worker.finished.connect(self.on_live_worker_finished)
+        self.live_worker.start()
 
     def stop_streaming(self):
-        """Stop the data acquisition worker."""
-        if self.data_worker:
-            self.data_worker.stop()
-    
+        """Stop the live acquisition worker."""
+        if self.live_worker:
+            self.live_worker.stop()
+            self.live_worker.wait() # Wait for thread to finish cleanly
+
     def start_fixed_run(self):
         """Start the data acquisition worker for a fixed duration."""
         # Compute decimation from user-selected sample rate
@@ -456,11 +576,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.effective_rate_label.setText(f"Rate: {self.sample_rate/1e3:.1f} kHz  |  Max {max_duration:.2f} s")
         self.is_fixed_run = True
         self.run_duration = self.duration_spinbox.value()
-        visible_samples = math.ceil(self.run_duration * self.sample_rate)
-        self.target_visible_samples = visible_samples  # for trimming at the end
+        visible_samples_goal = math.ceil(self.run_duration * self.sample_rate * SAFETY_FACTOR)
+        self.target_visible_samples = math.ceil(self.run_duration * self.sample_rate)  # exact requested
         guard = 8 * 2048  # safe lag (8 descriptors) * samples per descriptor
         self.current_guard = guard  # remember for post-processing
-        samples_to_collect = visible_samples + guard
+        samples_to_collect = visible_samples_goal + guard
         
         self.start_button.setEnabled(False)
         self.run_button.setEnabled(False)
@@ -474,13 +594,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_and_clear_buffers()
         
         samples_per_update = max(DEFAULT_SAMPLES_PER_UPDATE, int(0.1 * self.sample_rate))
-        self.data_worker = DataWorker(self.driver, samples_per_update=samples_per_update, samples_to_collect=samples_to_collect)
-        self.connect_worker_signals()
-        self.data_worker.progress_updated.connect(self.run_progress_bar.setValue)
-        self.data_worker.start()
+        self.run_worker = RunWorker(self.driver, samples_per_update=samples_per_update, samples_to_collect=samples_to_collect)
+        self.connect_run_worker_signals()
+        self.run_worker.progress_updated.connect(self.run_progress_bar.setValue)
+        self.run_worker.start()
 
     def reset_and_clear_buffers(self):
         self.buffer_ptr = 0
+        self.sample_clock = 0  # Reset global sample counter
         self.last_time = 0.0
         self.total_samples_received = 0
         self.voltage_buffer.fill(0)
@@ -494,14 +615,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.coord_text.setText('')
         self.locked_coord_label.setText("Time: --\nVoltage: --")
 
-    def connect_worker_signals(self):
-        self.data_worker.data_ready.connect(self.update_plot)
-        self.data_worker.status_changed.connect(self.status_bar.showMessage)
-        self.data_worker.finished.connect(self.on_worker_finished)
+    def _get_decimated_window(self):
+        """Return (x, y) arrays decimated to <= MAX_POINTS_TO_PLOT covering the visible window."""
+        points_to_show = int(self.time_scale_s * self.sample_rate)
+        available = min(points_to_show, self.total_samples_received)
+        if available == 0:
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
 
-    def on_worker_finished(self):
-        """Called when either streaming is stopped or a run completes."""
-        self.data_worker = None
+        end_ptr = self.buffer_ptr
+        start_ptr = (end_ptr - available + self.max_plot_points) % self.max_plot_points
+
+        num_points = min(self.MAX_POINTS_TO_PLOT, available)
+        # Evenly spaced indices within the window
+        if num_points == available:
+            # Rare case where window smaller than MAX_POINTS_TO_PLOT
+            if start_ptr < end_ptr:
+                x_data = self.time_buffer[start_ptr:end_ptr]
+                y_data = self.voltage_buffer[start_ptr:end_ptr]
+            else:
+                x_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
+                y_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
+        else:
+            # Use linspace to avoid allocating large arrays
+            idx_offsets = (np.linspace(0, available - 1, num_points)).astype(np.int64)
+            indices = (start_ptr + idx_offsets) % self.max_plot_points
+            x_data = self.time_buffer[indices]
+            y_data = self.voltage_buffer[indices]
+        # Shift to window [0, time_scale_s]
+        window_end_time = self.sample_clock / self.sample_rate
+        window_start_time = max(0.0, window_end_time - self.time_scale_s)
+        x_data = x_data - window_start_time
+        return x_data, y_data
+
+    def connect_run_worker_signals(self):
+        self.run_worker.data_ready.connect(self.update_run_plot)
+        self.run_worker.status_changed.connect(self.status_bar.showMessage)
+        self.run_worker.finished.connect(self.on_run_worker_finished)
+
+    def on_run_worker_finished(self):
+        """Called when a fixed duration run completes."""
+        self.run_worker = None
         self.start_button.setEnabled(True)
         self.start_button.setChecked(False)
         self.run_button.setEnabled(True)
@@ -524,76 +677,93 @@ class MainWindow(QtWidgets.QMainWindow):
                 if abs(new_rate - self.sample_rate) / self.sample_rate > 0.01:
                     self.sample_rate = new_rate
                 # Always refresh the final plot with precisely trimmed data
-                x_data = np.linspace(0, self.run_duration, visible_samples, endpoint=False)
+                x_data = np.arange(visible_samples) / self.sample_rate
                 y_data = self.voltage_buffer[:visible_samples]
                 self.plot_curve.setData(x=x_data, y=y_data)
-
-            # Reset X axis with a small right-hand margin for visual comfort
-            self.plot_widget.setXRange(0, self.run_duration, padding=0.05)
+                # update duration in case of slight mismatch
+                run_duration_actual = visible_samples / self.sample_rate
+                self.plot_widget.setXRange(0, run_duration_actual, padding=0.05)
+            else:
+                self.plot_curve.setData(x=[], y=[])
 
             self.status_bar.showMessage(f"Run of {self.run_duration}s finished. {visible_samples} samples collected.")
             self.run_progress_bar.setValue(100)
+
+            # Show run plot panel and plot data
+            self.run_plot_curve.setData(x=x_data, y=y_data)
+            self.run_plot_widget.setVisible(True)
         else:
              self.status_bar.showMessage("Streaming stopped.")
     
+    def on_live_worker_finished(self):
+        """Called when live streaming is stopped."""
+        self.live_worker = None
+        self.run_button.setEnabled(True) # Re-enable run button
+        self.start_button.setChecked(False)
+        self.status_bar.showMessage("Live view stopped.")
+
     @QtCore.pyqtSlot(float)
     def set_time_scale(self, scale_s):
         """Update the visible time window."""
         self.time_scale_s = scale_s
         # Update decimation only if in live-streaming mode (worker running & not fixed run)
-        if self.data_worker and not self.is_fixed_run:
+        if self.run_worker and not self.is_fixed_run:
             dec_rate = compute_decimation(self.time_scale_s)
             self.driver.set_decimation_rate(dec_rate)
             self.sample_rate = self.driver.get_decimated_sample_rate()
+        # Reallocate live buffers for new window and clear data
+        self.resize_live_buffers()
+        self.reset_and_clear_buffers()
         self.plot_curve.setData(x=[], y=[])
         self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kHz)")
 
     @QtCore.pyqtSlot(np.ndarray)
-    def update_plot(self, new_data):
-        """Append new data to the circular buffer and update the plot."""
+    def update_run_plot(self, new_data):
+        """Append new data during fixed-run and update the plot efficiently."""
+        if self.freeze_checkbox.isChecked():
+            return
         n_new = new_data.size
         if n_new == 0:
             return
-
-        new_times = self.last_time + (np.arange(n_new) + 1) / self.sample_rate
-        self.last_time = new_times[-1]
-
+        self.sample_clock += n_new
+        new_times = (self.sample_clock / self.sample_rate) - (np.arange(n_new, 0, -1) / self.sample_rate)
         start_idx = self.buffer_ptr
         indices = np.arange(start_idx, start_idx + n_new) % self.max_plot_points
         self.voltage_buffer[indices] = new_data
         self.time_buffer[indices] = new_times
-        
         self.buffer_ptr = (start_idx + n_new) % self.max_plot_points
         self.total_samples_received += n_new
 
         if self.is_fixed_run:
-            x_data = self.time_buffer[:self.total_samples_received]
-            y_data = self.voltage_buffer[:self.total_samples_received]
-        else:
-            points_to_show = int(self.time_scale_s * self.sample_rate)
-            if self.total_samples_received < points_to_show:
-                x_data = self.time_buffer[:self.total_samples_received]
-                y_data = self.voltage_buffer[:self.total_samples_received]
-            else:
-                end_ptr = self.buffer_ptr
-                start_ptr = (end_ptr - points_to_show + self.max_plot_points) % self.max_plot_points
-                if start_ptr < end_ptr:
-                    x_data = self.time_buffer[start_ptr:end_ptr]
-                    y_data = self.voltage_buffer[start_ptr:end_ptr]
-                else:
-                    x_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
-                    y_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
-            
-        if x_data.size > self.MAX_POINTS_TO_PLOT:
-            stride = x_data.size // self.MAX_POINTS_TO_PLOT
-            self.plot_curve.setData(x=x_data[::stride], y=y_data[::stride])
-        else:
+            # Show only collected samples so far (efficient downsample)
+            available = self.total_samples_received
+            stride = max(1, available // self.MAX_POINTS_TO_PLOT)
+            idx_offsets = np.arange(0, available, stride, dtype=np.int64)
+            indices = idx_offsets % self.max_plot_points
+            x_data = self.time_buffer[indices]
+            y_data = self.voltage_buffer[indices]
             self.plot_curve.setData(x=x_data, y=y_data)
+        else:
+            x_data, y_data = self._get_decimated_window()
+            self.plot_widget.setXRange(0, self.time_scale_s, padding=0)
+            self.plot_curve.setData(x=x_data, y=y_data)
+
+        if new_data.size > 0:
+            ymin = float(np.min(new_data))
+            ymax = float(np.max(new_data))
+            rms  = float(np.sqrt(np.mean(np.square(new_data))))
+            p2p  = ymax - ymin
+            self.stats_label.setText(
+                f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V")
 
     def closeEvent(self, event):
         """Handle window close event."""
-        if self.data_worker:
-            self.data_worker.stop()
+        if self.run_worker:
+            self.run_worker.stop()
+            self.run_worker.wait()
+        if self.live_worker:
+            self.live_worker.stop()
+            self.live_worker.wait()
         event.accept()
 
     def update_max_duration(self):
@@ -601,6 +771,36 @@ class MainWindow(QtWidgets.QMainWindow):
         desired_rate = desired_rate_k * 1000
         max_duration = MAX_VISIBLE_SAMPLES / desired_rate if desired_rate > 0 else 0
         self.effective_rate_label.setText(f"Max T: {max_duration:.2f} s")
+
+    @QtCore.pyqtSlot(np.ndarray)
+    def update_live_plot(self, new_data):
+        """Append new data to the circular buffer and update the live plot efficiently."""
+        if self.freeze_checkbox.isChecked():
+            return
+        n_new = new_data.size
+        if n_new == 0:
+            return
+        # Update buffers (same as before)
+        self.sample_clock += n_new
+        new_times = (self.sample_clock / self.sample_rate) - (np.arange(n_new, 0, -1) / self.sample_rate)
+        start_idx = self.buffer_ptr
+        indices = np.arange(start_idx, start_idx + n_new) % self.max_plot_points
+        self.voltage_buffer[indices] = new_data
+        self.time_buffer[indices] = new_times
+        self.buffer_ptr = (start_idx + n_new) % self.max_plot_points
+        self.total_samples_received += n_new
+
+        x_data, y_data = self._get_decimated_window()
+        self.plot_widget.setXRange(0, self.time_scale_s, padding=0)
+        self.plot_curve.setData(x=x_data, y=y_data)
+
+        if y_data.size > 0:
+            ymin = float(np.min(y_data))
+            ymax = float(np.max(y_data))
+            rms  = float(np.sqrt(np.mean(np.square(y_data))))
+            p2p  = ymax - ymin
+            self.stats_label.setText(
+                f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V")
 
 def main():
     """Main function to run the application."""
