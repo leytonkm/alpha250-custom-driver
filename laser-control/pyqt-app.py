@@ -8,6 +8,19 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from koheron import connect, command
 import math
+import logging
+
+# -----------------------------------------------------------------------------
+# Logging configuration
+# -----------------------------------------------------------------------------
+
+DEBUG_ENABLED = os.environ.get('DEBUG', '0') == '1'
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_ENABLED else logging.INFO,
+    format='[%(asctime)s] %(levelname)s:%(name)s:%(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger('LaserControl')
 
 # --- Constants ---
 APP_TITLE = "Laser Control - Live ADC Scope"
@@ -57,6 +70,27 @@ class CurrentRamp:
         return self.client.recv_vector(dtype='float32')
 
     @command('CurrentRamp')
+    def read_adc_buffer_block(self, offset, size):
+        return self.client.recv_vector(dtype='float32')
+
+    # ---------------------------- Debug helpers ----------------------------
+    @command('CurrentRamp')
+    def get_current_descriptor_index(self):
+        return self.client.recv_uint32()
+
+    @command('CurrentRamp')
+    def get_dma_running(self):
+        return self.client.recv_bool()
+
+    @command('CurrentRamp')
+    def get_dma_idle(self):
+        return self.client.recv_bool()
+
+    @command('CurrentRamp')
+    def get_dma_error(self):
+        return self.client.recv_bool()
+
+    @command('CurrentRamp')
     def get_decimated_sample_rate(self):
         return self.client.recv_double()
 
@@ -86,6 +120,7 @@ class LiveWorker(QtCore.QThread):
         self.total_buffer_size = self.n_desc * self.n_pts
 
         self.running = False
+        self.debug_counter = 0  # for periodic prints
 
     def run(self):
         try:
@@ -114,12 +149,36 @@ class LiveWorker(QtCore.QThread):
                 if samples_available > 0:
                     read_size = min(samples_available, DEFAULT_SAMPLES_PER_UPDATE)
                     data = np.array(
-                        self.driver.read_adc_buffer_chunk(self.read_ptr, read_size), dtype=np.float32)
+                        self.driver.read_adc_buffer_block(self.read_ptr, read_size), dtype=np.float32)
                     if data.size > 0:
                         self.window_ready.emit(data)
                         self.read_ptr = (self.read_ptr + data.size) % self.total_buffer_size
 
                 elapsed = (time.time() - loop_start) * 1000
+
+                # ---------------- Debug instrumentation ----------------
+                if DEBUG_ENABLED:
+                    self.debug_counter += 1
+                    if self.debug_counter >= 20:  # every ~1 s (20 × 50 ms)
+                        self.debug_counter = 0
+                        desc = self.driver.get_current_descriptor_index()
+                        dma_run = self.driver.get_dma_running()
+                        dma_idle = self.driver.get_dma_idle()
+                        dma_err = self.driver.get_dma_error()
+                        logger.debug(
+                            "LiveWorker RD=%d WR=%d avail=%d desc=%d running=%s idle=%s err=%s",
+                            self.read_ptr, write_ptr, samples_available, desc, dma_run, dma_idle, dma_err)
+                        # Auto-restart DMA if it went idle (wrap reached)
+                        if dma_idle and not dma_err:
+                            logger.warning("DMA idle detected – restarting stream (wraparound)")
+                            self.driver.stop_adc_streaming()
+                            time.sleep(0.001)
+                            self.driver.start_adc_streaming()
+                            # Re-align read pointer safe distance behind new write pointer
+                            write_ptr = self.driver.get_buffer_position()
+                            self.read_ptr = (write_ptr - self.safe_lag_desc * self.n_pts + self.total_buffer_size) % self.total_buffer_size
+                            continue
+
                 time.sleep(max(0, self.refresh_ms - elapsed) / 1000)
 
         except Exception as e:
@@ -163,6 +222,7 @@ class RunWorker(QtCore.QThread):
         self.read_ptr = 0  # will be set after warm-up
         self.samples_to_collect = samples_to_collect
         self.samples_collected = 0
+        self.debug_counter = 0
 
     def run(self):
         """Main acquisition loop."""
@@ -181,7 +241,7 @@ class RunWorker(QtCore.QThread):
                 if samples_available > 0:
                     read_size = min(samples_available, self.samples_per_update)
                     # Read data to advance our pointer, but do nothing with the returned data
-                    _ = self.driver.read_adc_buffer_chunk(self.read_ptr, read_size)
+                    _ = self.driver.read_adc_buffer_block(self.read_ptr, read_size)
                     self.read_ptr = (self.read_ptr + read_size) % self.total_buffer_size
                 time.sleep(0.02) # Don't hog the CPU while waiting
             
@@ -214,7 +274,7 @@ class RunWorker(QtCore.QThread):
                         read_size = min(read_size, remaining)
 
                     if read_size > 0:
-                        data = np.array(self.driver.read_adc_buffer_chunk(self.read_ptr, read_size), dtype=np.float32)
+                        data = np.array(self.driver.read_adc_buffer_block(self.read_ptr, read_size), dtype=np.float32)
                         
                         if data.size > 0:
                             self.data_ready.emit(data)
@@ -226,6 +286,17 @@ class RunWorker(QtCore.QThread):
                                 self.progress_updated.emit(progress)
 
                 elapsed_ms = (time.time() - loop_start_time) * 1000
+
+                if DEBUG_ENABLED:
+                    self.debug_counter += 1
+                    if self.debug_counter >= 20:
+                        self.debug_counter = 0
+                        desc = self.driver.get_current_descriptor_index()
+                        logger.debug(
+                            "RunWorker RD=%d WR=%d avail=%d collected=%d/%s desc=%d",
+                            self.read_ptr, write_ptr, samples_available, self.samples_collected,
+                            self.samples_to_collect if self.samples_to_collect is not None else '∞', desc)
+
                 sleep_ms = max(0, UPDATE_INTERVAL_MS - elapsed_ms)
                 time.sleep(sleep_ms / 1000)
 
@@ -804,14 +875,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     """Main function to run the application."""
-    print("Attempting to connect to instrument...")
+    logger.info("Attempting to connect to instrument...")
     try:
         client = connect(DEFAULT_HOST, 'laser-control')
         driver = CurrentRamp(client)
-        print(f"✅ Connected to {INSTRUMENT_NAME} at {DEFAULT_HOST}")
+        logger.info("✅ Connected to %s at %s", INSTRUMENT_NAME, DEFAULT_HOST)
     except Exception as e:
-        print(f"❌ Connection failed: {e}")
-        print("Please ensure the instrument is running and accessible.")
+        logger.error("❌ Connection failed: %s", e)
+        logger.error("Please ensure the instrument is running and accessible.")
         return 1
 
     app = QtWidgets.QApplication(sys.argv)

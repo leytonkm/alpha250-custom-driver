@@ -527,6 +527,63 @@ class CurrentRamp
         return result;
     }
 
+    // === NEW FAST CHUNK READER ===
+    // Reads a block of samples much faster than read_adc_buffer_chunk by bursting
+    // 32-bit words and decoding two 16-bit ADC samples per AXI read. This reduces
+    // the number of MMIO transactions by ~2× and lets Python request >50 kS per call.
+    // offset and size are expressed in 16-bit samples (same as old function).
+    std::vector<float> read_adc_buffer_block(uint32_t offset, uint32_t size) {
+        if (!streaming_active || size == 0) {
+            return {};
+        }
+
+        const uint32_t total_buffer_samples = n_desc * n_pts;
+        if (offset >= total_buffer_samples) {
+            // Wrap offset explicitly so caller can pass huge values safely
+            offset = offset % total_buffer_samples;
+        }
+        if (size > total_buffer_samples) {
+            size = total_buffer_samples;
+        }
+
+        std::vector<float> result(size);
+        uint32_t buf_idx = offset;
+        const float scale = 0.5f / 13107.2f; // pre-compute for speed
+
+        uint32_t samples_remaining = size;
+        while (samples_remaining > 0) {
+            // We always read a 32-bit word that contains two 16-bit samples.
+            uint32_t sample_byte_offset = buf_idx * 2;
+            uint32_t read_addr_bytes   = (sample_byte_offset & ~0x3); // align to 4-byte boundary
+            uint32_t word32            = ram_s2mm.read_reg(read_addr_bytes);
+
+            // Decode the two 16-bit lanes
+            int16_t s0 = static_cast<int16_t>(word32 & 0xFFFF);
+            int16_t s1 = static_cast<int16_t>(word32 >> 16);
+
+            // Decide which lane(s) are valid depending on even/odd alignment
+            bool even_alignment = (sample_byte_offset % 4) == 0;
+            if (even_alignment) {
+                // s0 first, then possibly s1
+                result[size - samples_remaining] = static_cast<float>(s0) * scale;
+                samples_remaining--;
+                if (samples_remaining > 0) {
+                    result[size - samples_remaining] = static_cast<float>(s1) * scale;
+                    samples_remaining--;
+                    buf_idx = (buf_idx + 2) % total_buffer_samples;
+                } else {
+                    buf_idx = (buf_idx + 1) % total_buffer_samples;
+                }
+            } else {
+                // odd alignment: s1 is the first valid sample in this word
+                result[size - samples_remaining] = static_cast<float>(s1) * scale;
+                samples_remaining--;
+                buf_idx = (buf_idx + 1) % total_buffer_samples;
+            }
+        }
+        return result;
+    }
+
     // === TEST FUNCTIONS ===
     // For precision DAC testing - direct voltage control on all channels
     
