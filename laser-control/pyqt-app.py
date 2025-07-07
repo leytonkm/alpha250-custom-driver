@@ -840,6 +840,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_triggers = np.array([])
         self._last_trigger_data = np.array([])
         self._last_time_data = np.array([])
+        
+        # Initialize trigger system timing
+        import time
+        self.trigger_system.last_successful_trigger_time = time.time()
 
         # Allocate live buffers sized to current time window plus safety margin
         self.resize_live_buffers()
@@ -1098,16 +1102,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         plots_container.addWidget(self.plot_widget)
 
-        # Run plot (bottom) hidden until a fixed run completes
-        self.run_plot_widget = pg.PlotWidget()
-        self.run_plot_curve = self.run_plot_widget.plot(pen=pg.mkPen('g', width=2))
-        self.run_plot_widget.setLabel('bottom', "Run Time", units='s')
-        self.run_plot_widget.setLabel('left', "Voltage", units='V')
-        self.run_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.run_plot_widget.setVisible(False)
-
-        plots_container.addWidget(self.run_plot_widget)
-
         main_layout.addLayout(plots_container)
         main_layout.addWidget(control_panel)
 
@@ -1232,13 +1226,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_line.setVisible(enabled)
         
         if enabled:
-            # Auto-start live view when trigger is enabled
-            if not self.start_button.isChecked():
-                self.start_button.setChecked(True)
-                self.start_streaming()
-            
-            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
-            self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
+            # Check if streaming is active before auto-starting
+            if hasattr(self, 'live_worker') and self.live_worker is not None and self.live_worker.isRunning():
+                # Streaming is already active
+                self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
+                self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
+            else:
+                # Auto-start live view when trigger is enabled
+                if not self.start_button.isChecked():
+                    self.start_button.setChecked(True)
+                    self.start_streaming()
+                self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Starting...")
+                self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
         else:
             self.trigger_status_label.setText("Status: Disabled")
             self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
@@ -1301,31 +1300,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_button.setText("Start Streaming")
 
     def start_streaming(self):
-        """Start the live acquisition worker."""
-        self.is_fixed_run = False
-        self.run_button.setEnabled(False)  # Disable run button
+        """Start live streaming with the LiveWorker thread."""
+        if self.live_worker is not None and self.live_worker.isRunning():
+            return  # Already running
+
         self.reset_and_clear_buffers()
         
-        # Clear any existing DMA errors before starting
-        try:
-            self.driver.stop_adc_streaming()
-            time.sleep(0.001)  # Brief pause to ensure clean state
-        except:
-            pass  # Ignore errors when stopping (might not be running)
+        # Calculate guard points based on current time scale
+        guard_pts = 8 * 2048  # 8 DMA descriptors as safety margin
         
-        dec_rate = compute_decimation(self.time_scale_s)
-        self.driver.set_decimation_rate(dec_rate)
-        self.sample_rate = self.driver.get_decimated_sample_rate()
-        
-        self.resize_live_buffers() # Ensure buffers are sized for this view
-
-        guard_pts = 8 * 2048
-        self.live_worker = LiveWorker(self.driver, self.sample_rate, self.time_scale_s, guard_pts)
+        self.live_worker = LiveWorker(
+            self.driver, 
+            self.sample_rate, 
+            self.time_scale_s, 
+            guard_pts, 
+            UPDATE_INTERVAL_MS
+        )
         self.live_worker.window_ready.connect(self.update_live_plot)
         self.live_worker.status_changed.connect(self.status_bar.showMessage)
         self.live_worker.finished.connect(self.on_live_worker_finished)
         self.live_worker.dma_error_occurred.connect(self.on_dma_error_occurred)
         self.live_worker.start()
+        
+        # Update trigger status if trigger is enabled
+        if self.trigger_enabled:
+            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
 
     def stop_streaming(self):
         """Stop the live acquisition worker."""
@@ -1428,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return x_data, y_data
 
     def connect_run_worker_signals(self):
-        self.run_worker.data_ready.connect(self.update_run_plot)
+        self.run_worker.data_ready.connect(self.update_main_plot_from_run)
         self.run_worker.status_changed.connect(self.status_bar.showMessage)
         self.run_worker.finished.connect(self.on_run_worker_finished)
 
@@ -1469,9 +1469,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_bar.showMessage(f"Run of {self.run_duration}s finished. {visible_samples} samples collected.")
             self.run_progress_bar.setValue(100)
 
-            # Show run plot panel and plot data
-            self.run_plot_curve.setData(x=x_data, y=y_data)
-            self.run_plot_widget.setVisible(True)
+            # Data is displayed in the main plot (no separate run plot)
         else:
              self.status_bar.showMessage("Streaming stopped.")
     
@@ -1498,8 +1496,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kHz)")
 
     @QtCore.pyqtSlot(np.ndarray)
-    def update_run_plot(self, new_data):
-        """Append new data during fixed-run and update the plot efficiently."""
+    def update_main_plot_from_run(self, new_data):
+        """Update main plot during fixed-duration runs (no separate run plot)."""
         if self.freeze_button.isChecked():
             return
         n_new = new_data.size
@@ -1631,6 +1629,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _get_triggered_window(self):
         """Get triggered window of data for display - simplified with error handling"""
         try:
+            # Check if we have any data at all
+            if not hasattr(self, 'voltage_buffer') or self.total_samples_received == 0:
+                return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+                
             # Get enough data for trigger analysis - not the entire time scale!
             # We need enough data to find triggers and extract the requested periods
             if self.trigger_system.detected_period is not None:
@@ -1656,13 +1658,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # Ensure we don't request more than available
             available = min(analysis_samples, self.total_samples_received)
             
-            if available < 100:
+            # Need minimum data for meaningful trigger analysis
+            if available < 500:  # Increased from 100 for better trigger detection
                 return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
-                
-            # Limit maximum analysis size to prevent memory issues
-            if available > 500000:  # > 5 seconds at 100kHz
-                print(f"Warning: Analysis window too large ({available} samples), limiting to 5 seconds")
-                available = 500000
                 
             end_ptr = self.buffer_ptr
             start_ptr = (end_ptr - available + self.max_plot_points) % self.max_plot_points
