@@ -137,7 +137,11 @@ class TriggerSystem:
         """Find peaks with adaptive thresholds"""
         data_range = np.max(data) - np.min(data)
         min_height = np.min(data) + min_height_ratio * data_range
-        min_distance = max(10, int(min_distance_ratio * len(data)))
+        
+        # Adaptive minimum distance - scale with data length for high frequencies
+        # For high-frequency signals, we need smaller distances
+        base_distance = int(min_distance_ratio * len(data))
+        min_distance = max(5, min(base_distance, len(data) // 20))  # At least 5, max 1/20 of data length
         
         from scipy.signal import find_peaks
         peaks, properties = find_peaks(data, height=min_height, distance=min_distance)
@@ -147,6 +151,10 @@ class TriggerSystem:
         """Find zero crossings or threshold crossings"""
         if threshold is None:
             threshold = self.level
+            
+        # Ensure we have enough data
+        if len(data) < 2:
+            return np.array([])
             
         if edge == 'rising':
             crossings = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
@@ -161,10 +169,30 @@ class TriggerSystem:
         
     def hysteresis_trigger(self, data, low_thresh=None, high_thresh=None):
         """Hysteresis triggering to avoid noise"""
+        if len(data) < 2:
+            return np.array([])
+            
         if low_thresh is None:
             data_range = np.max(data) - np.min(data)
-            low_thresh = self.level - self.hysteresis * data_range
-            high_thresh = self.level + self.hysteresis * data_range
+            if data_range == 0:
+                return np.array([])
+                
+            # Adaptive hysteresis based on signal characteristics
+            # For high-frequency signals, use smaller hysteresis
+            # For noisy signals, use larger hysteresis
+            noise_estimate = np.std(np.diff(data))  # Estimate noise from derivative
+            signal_estimate = data_range
+            
+            if signal_estimate > 0:
+                noise_ratio = noise_estimate / signal_estimate
+                # Scale hysteresis: more noise = more hysteresis, but keep it reasonable
+                adaptive_hysteresis = max(0.005, min(0.05, self.hysteresis + noise_ratio * 0.02))
+            else:
+                adaptive_hysteresis = self.hysteresis
+                
+            hysteresis_amount = adaptive_hysteresis * data_range
+            low_thresh = self.level - hysteresis_amount / 2
+            high_thresh = self.level + hysteresis_amount / 2
             
         state = 'low'
         triggers = []
@@ -243,13 +271,28 @@ class TriggerSystem:
         elif self.mode == 'edge':
             # Use derivative for edge detection
             derivative = np.diff(data)
-            if self.edge == 'rising':
-                from scipy.signal import find_peaks
-                edge_points, _ = find_peaks(derivative, distance=self.holdoff_samples)
+            if len(derivative) == 0:
+                triggers = np.array([])
             else:
-                from scipy.signal import find_peaks
-                edge_points, _ = find_peaks(-derivative, distance=self.holdoff_samples)
-            triggers = edge_points
+                # Adaptive threshold based on derivative statistics
+                deriv_std = np.std(derivative)
+                if deriv_std > 0:
+                    # Use a threshold that's proportional to the derivative's standard deviation
+                    threshold = max(0.5 * deriv_std, 0.1 * np.max(np.abs(derivative)))
+                    
+                    # Adaptive distance for high-frequency signals
+                    adaptive_distance = max(5, min(self.holdoff_samples, len(data) // 50))
+                    
+                    if self.edge == 'rising':
+                        from scipy.signal import find_peaks
+                        edge_points, _ = find_peaks(derivative, height=threshold, distance=adaptive_distance)
+                    else:
+                        from scipy.signal import find_peaks
+                        edge_points, _ = find_peaks(-derivative, height=threshold, distance=adaptive_distance)
+                    triggers = edge_points
+                else:
+                    triggers = np.array([])
+            
         elif self.mode == 'hysteresis':
             triggers = self.hysteresis_trigger(data)
         else:
@@ -257,9 +300,19 @@ class TriggerSystem:
             
         # Apply holdoff
         if len(triggers) > 1:
+            # Adaptive holdoff based on data characteristics
+            # For high-frequency signals, use smaller holdoff
+            # For low-frequency signals, use larger holdoff
+            if self.detected_period is not None:
+                # Use a fraction of the detected period as holdoff
+                adaptive_holdoff = max(5, min(self.holdoff_samples, self.detected_period // 4))
+            else:
+                # Fallback: scale holdoff with data length
+                adaptive_holdoff = max(5, min(self.holdoff_samples, len(data) // 100))
+                
             filtered_triggers = [triggers[0]]
             for trigger in triggers[1:]:
-                if trigger - filtered_triggers[-1] >= self.holdoff_samples:
+                if trigger - filtered_triggers[-1] >= adaptive_holdoff:
                     filtered_triggers.append(trigger)
             triggers = np.array(filtered_triggers)
             
@@ -268,8 +321,9 @@ class TriggerSystem:
             periods = np.diff(triggers)
             avg_period = np.median(periods)
             self.update_period_estimate(avg_period)
-        elif self.mode == 'auto':
-            # Try autocorrelation for period detection
+        else:
+            # Try autocorrelation for period detection when we don't have enough triggers
+            # This ensures all modes can show frequency/period information
             period = self.detect_period_autocorr(data)
             self.update_period_estimate(period)
             
@@ -277,41 +331,71 @@ class TriggerSystem:
         
     def _auto_trigger(self, data):
         """Automatic trigger mode - tries multiple methods"""
+        if len(data) < 10:
+            return np.array([])
+            
         # Try peak detection first (good for triangular/sawtooth waves)
         peaks, properties = self.find_peaks_robust(data)
         
         if len(peaks) >= 2:
             # Check if peaks are reasonably periodic
             periods = np.diff(peaks)
-            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-            
-            if period_std < 0.3:  # Less than 30% variation
-                return peaks
+            if len(periods) > 0:
+                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+                
+                if period_std < 0.3:  # Less than 30% variation
+                    return peaks
         
         # For triangular waves, try finding valleys (negative peaks) as well
         valleys, _ = self.find_peaks_robust(-data)  # Invert signal to find valleys
         
         if len(valleys) >= 2:
             periods = np.diff(valleys)
-            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-            
-            if period_std < 0.3:
-                return valleys
+            if len(periods) > 0:
+                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
                 
+                if period_std < 0.3:
+                    return valleys
+                    
         # Try zero crossing if peaks/valleys aren't good
         crossings = self.find_zero_crossings(data, edge='rising')
         if len(crossings) >= 2:
             periods = np.diff(crossings)
-            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-            
-            if period_std < 0.4:  # Slightly more tolerant for zero crossings
-                return crossings
+            if len(periods) > 0:
+                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+                
+                if period_std < 0.4:  # Slightly more tolerant for zero crossings
+                    return crossings
             
         # Try falling edge zero crossings
         crossings = self.find_zero_crossings(data, edge='falling')
         if len(crossings) >= 2:
-            return crossings
-            
+            periods = np.diff(crossings)
+            if len(periods) > 0:
+                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+                
+                if period_std < 0.4:
+                    return crossings
+                    
+        # Try edge detection for square waves
+        derivative = np.diff(data)
+        if len(derivative) > 0:
+            deriv_std = np.std(derivative)
+            if deriv_std > 0:
+                threshold = max(0.5 * deriv_std, 0.1 * np.max(np.abs(derivative)))
+                adaptive_distance = max(5, min(self.holdoff_samples, len(data) // 50))
+                
+                from scipy.signal import find_peaks
+                rising_edges, _ = find_peaks(derivative, height=threshold, distance=adaptive_distance)
+                
+                if len(rising_edges) >= 2:
+                    periods = np.diff(rising_edges)
+                    if len(periods) > 0:
+                        period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+                        
+                        if period_std < 0.4:
+                            return rising_edges
+             
         # Fallback to hysteresis
         return self.hysteresis_trigger(data)
         
