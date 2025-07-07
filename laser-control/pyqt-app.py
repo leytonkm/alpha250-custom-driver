@@ -111,6 +111,7 @@ class TriggerSystem:
         self.hysteresis = 0.01  # For hysteresis mode
         self.auto_level = True
         self.holdoff_samples = 100  # Minimum samples between triggers
+        self.periods_to_display = 2.0  # Default number of periods to show
         
         # Period detection
         self.detected_period = None
@@ -347,7 +348,8 @@ class TriggerSystem:
             'level': self.level,
             'edge': self.edge,
             'period': self.detected_period,
-            'auto_level': self.auto_level
+            'auto_level': self.auto_level,
+            'periods_to_display': self.periods_to_display
         }
         return info
 
@@ -746,8 +748,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_level_button = QtWidgets.QPushButton("Auto Level")
         trigger_layout.addWidget(self.auto_level_button)
         
+        # Periods to display control
+        periods_layout = QtWidgets.QHBoxLayout()
+        periods_layout.addWidget(QtWidgets.QLabel("Periods:"))
+        self.periods_spinbox = QtWidgets.QDoubleSpinBox()
+        self.periods_spinbox.setRange(1.0, 5.0)
+        self.periods_spinbox.setDecimals(1)
+        self.periods_spinbox.setSingleStep(0.5)
+        self.periods_spinbox.setValue(2.0)  # Default to 2 periods
+        periods_layout.addWidget(self.periods_spinbox)
+        trigger_layout.addLayout(periods_layout)
+        
         # Trigger status display
-        self.trigger_status_label = QtWidgets.QLabel("Disabled")
+        self.trigger_status_label = QtWidgets.QLabel("Status: Disabled")
         self.trigger_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
         trigger_layout.addWidget(self.trigger_status_label)
@@ -876,6 +889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_level_spinbox.valueChanged.connect(self.on_trigger_level_changed)
         self.trigger_edge_combo.currentTextChanged.connect(self.on_trigger_edge_changed)
         self.auto_level_button.clicked.connect(self.on_auto_level_clicked)
+        self.periods_spinbox.valueChanged.connect(self.on_periods_changed)
 
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
@@ -976,10 +990,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.start_button.setChecked(True)
                 self.start_streaming()
             
-            self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | Starting...")
+            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()}")
             self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
         else:
-            self.trigger_status_label.setText("Disabled")
+            self.trigger_status_label.setText("Status: Disabled")
             self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
             self.trigger_markers.setData([], [])
             
@@ -1023,6 +1037,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 auto_level = np.mean([np.min(recent_data), np.max(recent_data)])
                 self.trigger_level_spinbox.setValue(auto_level)
                 self.trigger_system.auto_level = True
+
+    def on_periods_changed(self):
+        """Update the number of periods to display in the triggered window."""
+        self.trigger_system.periods_to_display = self.periods_spinbox.value()
 
     @QtCore.pyqtSlot(bool)
     def toggle_streaming(self, checked):
@@ -1338,7 +1356,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _get_triggered_window(self):
         """Get triggered window of data for display"""
         # Get recent data for trigger analysis
-        window_samples = int(self.time_scale_s * self.sample_rate * 1.5)  # 1.5x for trigger analysis
+        window_samples = int(self.time_scale_s * self.sample_rate * self.trigger_system.periods_to_display)
         available = min(window_samples, self.total_samples_received)
         
         if available < 100:
@@ -1356,7 +1374,7 @@ class MainWindow(QtWidgets.QMainWindow):
             time_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
             
         # Get triggered window
-        triggered_voltage, offset = self.trigger_system.get_triggered_window(voltage_data, window_periods=2.0)
+        triggered_voltage, offset = self.trigger_system.get_triggered_window(voltage_data, window_periods=self.trigger_system.periods_to_display)
         
         if len(triggered_voltage) == 0:
             return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
@@ -1367,7 +1385,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.trigger_system.detected_period is not None:
             # Calculate optimal display window based on detected period
             period_time = self.trigger_system.detected_period / self.sample_rate
-            display_periods = 2.5  # Show 2.5 periods for good context
+            display_periods = self.trigger_system.periods_to_display
             optimal_window_time = display_periods * period_time
             
             # Find trigger points in the triggered data
@@ -1431,50 +1449,33 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update status with period info
             if self.trigger_system.detected_period is not None:
                 period_samples = self.trigger_system.detected_period
-                period_time = period_samples / self.sample_rate if self.sample_rate > 0 else 0
-                
-                # Calculate frequency with error handling
-                if period_time > 0 and not np.isnan(period_time) and np.isfinite(period_time):
-                    frequency = 1.0 / period_time
-                else:
-                    frequency = 0
+                period_time = period_samples / self.sample_rate
+                frequency = 1.0 / period_time if period_time > 0 else 0
                 
                 # Debug logging for frequency calculation
                 if DEBUG_ENABLED:
                     logger.debug(f"Frequency calc: period_samples={period_samples}, sample_rate={self.sample_rate}, period_time={period_time}, freq={frequency}")
                 
-                # Format frequency appropriately with error handling
-                if np.isnan(frequency) or not np.isfinite(frequency):
-                    freq_str = "NaN"
-                elif frequency >= 1000:
+                # Format frequency appropriately
+                if frequency >= 1000:
                     freq_str = f"{frequency/1000:.2f}kHz"
                 elif frequency >= 1:
                     freq_str = f"{frequency:.1f}Hz"
-                elif frequency > 0:
-                    freq_str = f"{frequency*1000:.1f}mHz"
                 else:
-                    freq_str = "0Hz"
-                    
-                # Debug logging for frequency formatting
-                if DEBUG_ENABLED:
-                    logger.debug(f"Frequency formatting: freq={frequency}, freq_str='{freq_str}'")
+                    freq_str = f"{frequency*1000:.1f}mHz"
                 
-                status_text = f"{self.trigger_system.mode.title()} | Period: {period_time*1000:.1f}ms | Freq: {freq_str}"
+                status_text = f"Status: {self.trigger_system.mode.title()} | Period: {period_time*1000:.1f}ms | Freq: {freq_str}"
                 self.trigger_status_label.setText(status_text)
-                
-                # Debug logging for final status text
-                if DEBUG_ENABLED:
-                    logger.debug(f"Final status text: '{status_text}'")
                 
                 # Update the trigger status color to indicate active triggering
                 self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
             else:
-                self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | Searching...")
+                self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
                 self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
         else:
             self.trigger_markers.setData([], [])
             if self.trigger_enabled:
-                self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | No triggers")
+                self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | No triggers")
                 self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
 
 def main():
