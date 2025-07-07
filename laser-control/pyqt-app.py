@@ -4,6 +4,7 @@ import sys
 import os
 import time
 import numpy as np
+from scipy.signal import find_peaks
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from koheron import connect, command
@@ -98,6 +99,258 @@ class CurrentRamp:
     def set_decimation_rate(self, rate):
         pass
 
+# --- Triggering System ---
+
+class TriggerSystem:
+    """Advanced oscilloscope-like triggering system."""
+    
+    def __init__(self):
+        self.mode = 'auto'  # 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis'
+        self.level = 0.0
+        self.edge = 'rising'  # 'rising', 'falling'
+        self.hysteresis = 0.01  # For hysteresis mode
+        self.auto_level = True
+        self.holdoff_samples = 100  # Minimum samples between triggers
+        
+        # Period detection
+        self.detected_period = None
+        self.period_history = []
+        self.max_period_history = 10
+        
+    def set_trigger_mode(self, mode):
+        """Set trigger mode: 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis'"""
+        self.mode = mode
+        
+    def set_trigger_level(self, level):
+        """Set trigger level (fraction of signal range)"""
+        self.level = level
+        self.auto_level = False
+        
+    def auto_set_level(self, data):
+        """Automatically set trigger level to 50% of signal range"""
+        if self.auto_level:
+            data_min, data_max = np.min(data), np.max(data)
+            self.level = (data_min + data_max) / 2
+            
+    def find_peaks_robust(self, data, min_height_ratio=0.3, min_distance_ratio=0.1):
+        """Find peaks with adaptive thresholds"""
+        data_range = np.max(data) - np.min(data)
+        min_height = np.min(data) + min_height_ratio * data_range
+        min_distance = max(10, int(min_distance_ratio * len(data)))
+        
+        from scipy.signal import find_peaks
+        peaks, properties = find_peaks(data, height=min_height, distance=min_distance)
+        return peaks, properties
+        
+    def find_zero_crossings(self, data, threshold=None, edge='rising'):
+        """Find zero crossings or threshold crossings"""
+        if threshold is None:
+            threshold = self.level
+            
+        if edge == 'rising':
+            crossings = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
+        elif edge == 'falling':
+            crossings = np.where((data[:-1] >= threshold) & (data[1:] < threshold))[0]
+        else:  # both
+            rising = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
+            falling = np.where((data[:-1] >= threshold) & (data[1:] < threshold))[0]
+            crossings = np.sort(np.concatenate([rising, falling]))
+            
+        return crossings + 1  # +1 because we check data[1:]
+        
+    def hysteresis_trigger(self, data, low_thresh=None, high_thresh=None):
+        """Hysteresis triggering to avoid noise"""
+        if low_thresh is None:
+            data_range = np.max(data) - np.min(data)
+            low_thresh = self.level - self.hysteresis * data_range
+            high_thresh = self.level + self.hysteresis * data_range
+            
+        state = 'low'
+        triggers = []
+        
+        for i, sample in enumerate(data):
+            if state == 'low' and sample > high_thresh:
+                triggers.append(i)
+                state = 'high'
+            elif state == 'high' and sample < low_thresh:
+                state = 'low'
+                
+        return np.array(triggers)
+        
+    def detect_period_autocorr(self, data, max_period_ratio=0.8):
+        """Detect period using autocorrelation"""
+        if len(data) < 100:
+            return None
+            
+        # Remove DC component
+        data_centered = data - np.mean(data)
+        
+        # Autocorrelation
+        autocorr = np.correlate(data_centered, data_centered, mode='full')
+        autocorr = autocorr[len(autocorr)//2:]
+        
+        # Normalize
+        autocorr = autocorr / autocorr[0]
+        
+        # Find peaks, excluding the zero-lag peak
+        max_period = int(max_period_ratio * len(data))
+        search_range = autocorr[10:max_period]  # Skip first few samples
+        
+        if len(search_range) < 10:
+            return None
+            
+        from scipy.signal import find_peaks
+        peaks, _ = find_peaks(search_range, height=0.3, distance=20)
+        
+        if len(peaks) > 0:
+            period = peaks[0] + 10  # Add back the offset
+            return period
+            
+        return None
+        
+    def update_period_estimate(self, new_period):
+        """Update period estimate with smoothing"""
+        if new_period is not None:
+            self.period_history.append(new_period)
+            if len(self.period_history) > self.max_period_history:
+                self.period_history.pop(0)
+                
+            # Use median for robustness
+            self.detected_period = int(np.median(self.period_history))
+            
+            # Debug logging
+            if DEBUG_ENABLED:
+                import logging
+                logger = logging.getLogger('LaserControl')
+                logger.debug(f"Period update: new={new_period}, history={self.period_history}, detected={self.detected_period}")
+            
+    def find_triggers(self, data):
+        """Main trigger detection function"""
+        if len(data) < 50:
+            return np.array([])
+            
+        self.auto_set_level(data)
+        
+        if self.mode == 'auto':
+            # Try different methods and pick the best
+            triggers = self._auto_trigger(data)
+        elif self.mode == 'peak':
+            peaks, _ = self.find_peaks_robust(data)
+            triggers = peaks
+        elif self.mode == 'zero_cross':
+            triggers = self.find_zero_crossings(data, edge=self.edge)
+        elif self.mode == 'edge':
+            # Use derivative for edge detection
+            derivative = np.diff(data)
+            if self.edge == 'rising':
+                from scipy.signal import find_peaks
+                edge_points, _ = find_peaks(derivative, distance=self.holdoff_samples)
+            else:
+                from scipy.signal import find_peaks
+                edge_points, _ = find_peaks(-derivative, distance=self.holdoff_samples)
+            triggers = edge_points
+        elif self.mode == 'hysteresis':
+            triggers = self.hysteresis_trigger(data)
+        else:
+            triggers = np.array([])
+            
+        # Apply holdoff
+        if len(triggers) > 1:
+            filtered_triggers = [triggers[0]]
+            for trigger in triggers[1:]:
+                if trigger - filtered_triggers[-1] >= self.holdoff_samples:
+                    filtered_triggers.append(trigger)
+            triggers = np.array(filtered_triggers)
+            
+        # Update period estimate
+        if len(triggers) >= 2:
+            periods = np.diff(triggers)
+            avg_period = np.median(periods)
+            self.update_period_estimate(avg_period)
+        elif self.mode == 'auto':
+            # Try autocorrelation for period detection
+            period = self.detect_period_autocorr(data)
+            self.update_period_estimate(period)
+            
+        return triggers
+        
+    def _auto_trigger(self, data):
+        """Automatic trigger mode - tries multiple methods"""
+        # Try peak detection first (good for triangular/sawtooth waves)
+        peaks, properties = self.find_peaks_robust(data)
+        
+        if len(peaks) >= 2:
+            # Check if peaks are reasonably periodic
+            periods = np.diff(peaks)
+            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+            
+            if period_std < 0.3:  # Less than 30% variation
+                return peaks
+        
+        # For triangular waves, try finding valleys (negative peaks) as well
+        valleys, _ = self.find_peaks_robust(-data)  # Invert signal to find valleys
+        
+        if len(valleys) >= 2:
+            periods = np.diff(valleys)
+            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+            
+            if period_std < 0.3:
+                return valleys
+                
+        # Try zero crossing if peaks/valleys aren't good
+        crossings = self.find_zero_crossings(data, edge='rising')
+        if len(crossings) >= 2:
+            periods = np.diff(crossings)
+            period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
+            
+            if period_std < 0.4:  # Slightly more tolerant for zero crossings
+                return crossings
+            
+        # Try falling edge zero crossings
+        crossings = self.find_zero_crossings(data, edge='falling')
+        if len(crossings) >= 2:
+            return crossings
+            
+        # Fallback to hysteresis
+        return self.hysteresis_trigger(data)
+        
+    def get_triggered_window(self, data, window_periods=2.0):
+        """Get a window of data centered on trigger with specified number of periods"""
+        triggers = self.find_triggers(data)
+        
+        if len(triggers) == 0:
+            # No triggers found, return middle portion
+            start = len(data) // 4
+            end = 3 * len(data) // 4
+            return data[start:end], start
+            
+        # Use the middle trigger if multiple found
+        trigger_idx = triggers[len(triggers) // 2]
+        
+        # Determine window size
+        if self.detected_period is not None:
+            window_size = int(window_periods * self.detected_period)
+        else:
+            # Fallback to a reasonable fraction of data
+            window_size = len(data) // 2
+            
+        # Center window on trigger
+        start = max(0, trigger_idx - window_size // 2)
+        end = min(len(data), trigger_idx + window_size // 2)
+        
+        return data[start:end], start
+        
+    def get_status_info(self):
+        """Get trigger status information for display"""
+        info = {
+            'mode': self.mode,
+            'level': self.level,
+            'edge': self.edge,
+            'period': self.detected_period,
+            'auto_level': self.auto_level
+        }
+        return info
+
 # --- Live Window Worker (infinite rolling oscilloscope) ---
 
 class LiveWorker(QtCore.QThread):
@@ -159,7 +412,7 @@ class LiveWorker(QtCore.QThread):
                 # ---------------- Debug instrumentation ----------------
                 if DEBUG_ENABLED:
                     self.debug_counter += 1
-                    if self.debug_counter >= 20:  # every ~1 s (20 × 50 ms)
+                    if self.debug_counter >= 5:  # Every ~250ms (5 × 50 ms) for faster idle detection
                         self.debug_counter = 0
                         desc = self.driver.get_current_descriptor_index()
                         dma_run = self.driver.get_dma_running()
@@ -168,13 +421,22 @@ class LiveWorker(QtCore.QThread):
                         logger.debug(
                             "LiveWorker RD=%d WR=%d avail=%d desc=%d running=%s idle=%s err=%s",
                             self.read_ptr, write_ptr, samples_available, desc, dma_run, dma_idle, dma_err)
-                        # Auto-restart DMA if it went idle (wrap reached)
+                        # Ultra-fast restart for minimal gaps
                         if dma_idle and not dma_err:
-                            logger.warning("DMA idle detected – restarting stream (wraparound)")
+                            logger.debug("DMA idle detected - ultra-fast restart")
                             self.driver.stop_adc_streaming()
-                            time.sleep(0.001)
+                            time.sleep(0.0001)  # Just 100µs delay
                             self.driver.start_adc_streaming()
-                            # Re-align read pointer safe distance behind new write pointer
+                            # Re-align read pointer
+                            write_ptr = self.driver.get_buffer_position()
+                            self.read_ptr = (write_ptr - self.safe_lag_desc * self.n_pts + self.total_buffer_size) % self.total_buffer_size
+                            continue
+                        if dma_err:
+                            logger.warning("DMA error detected - attempting restart")
+                            self.driver.stop_adc_streaming()
+                            time.sleep(0.001)  # 1ms delay
+                            self.driver.start_adc_streaming()
+                            # Re-align read pointer
                             write_ptr = self.driver.get_buffer_position()
                             self.read_ptr = (write_ptr - self.safe_lag_desc * self.n_pts + self.total_buffer_size) % self.total_buffer_size
                             continue
@@ -332,6 +594,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.time_scale_s = 5.0 # Default time window to display
         self.sample_rate = self.driver.get_decimated_sample_rate()
         
+        # --- Trigger System ---
+        self.trigger_system = TriggerSystem()
+        self.trigger_enabled = False
+        
         # Allocate live buffers sized to current time window plus safety margin
         self.resize_live_buffers()
         self.buffer_ptr = 0
@@ -382,6 +648,19 @@ class MainWindow(QtWidgets.QMainWindow):
         streaming_layout = QtWidgets.QVBoxLayout()
         self.start_button = QtWidgets.QPushButton("Enable Live View")
         self.start_button.setCheckable(True)
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #90EE90;
+                border-color: #4CAF50;
+            }
+        """)
         self.ts_group_box = QtWidgets.QGroupBox("Time Scale")
         ts_layout = QtWidgets.QVBoxLayout()
         self.ts_radios = {}
@@ -391,11 +670,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ts_radios[self.time_scale_s].setChecked(True)
         self.ts_group_box.setLayout(ts_layout)
         streaming_layout.addWidget(self.start_button)
-        # Freeze checkbox
-        self.freeze_checkbox = QtWidgets.QCheckBox("Freeze")
-        streaming_layout.addWidget(self.freeze_checkbox)
         streaming_layout.addWidget(self.ts_group_box)
         streaming_group_box.setLayout(streaming_layout)
+
+        # --- Trigger Controls ---
+        trigger_group_box = QtWidgets.QGroupBox("Trigger")
+        trigger_layout = QtWidgets.QVBoxLayout()
+        
+        # Trigger enable toggle button
+        self.trigger_enable_button = QtWidgets.QPushButton("Enable Trigger")
+        self.trigger_enable_button.setCheckable(True)
+        self.trigger_enable_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #FFE4B5;
+                border-color: #FFA500;
+            }
+        """)
+        trigger_layout.addWidget(self.trigger_enable_button)
+        
+        # Freeze toggle button (moved here for better workflow)
+        self.freeze_button = QtWidgets.QPushButton("Freeze Display")
+        self.freeze_button.setCheckable(True)
+        self.freeze_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #FFB6C1;
+                border-color: #FF69B4;
+            }
+        """)
+        trigger_layout.addWidget(self.freeze_button)
+        
+        # Trigger mode selection
+        trigger_mode_layout = QtWidgets.QHBoxLayout()
+        trigger_mode_layout.addWidget(QtWidgets.QLabel("Mode:"))
+        self.trigger_mode_combo = QtWidgets.QComboBox()
+        self.trigger_mode_combo.addItems(['Auto', 'Peak', 'Zero Cross', 'Edge', 'Hysteresis'])
+        self.trigger_mode_combo.setCurrentText('Auto')
+        trigger_mode_layout.addWidget(self.trigger_mode_combo)
+        trigger_layout.addLayout(trigger_mode_layout)
+        
+        # Trigger level control
+        trigger_level_layout = QtWidgets.QHBoxLayout()
+        trigger_level_layout.addWidget(QtWidgets.QLabel("Level:"))
+        self.trigger_level_spinbox = QtWidgets.QDoubleSpinBox()
+        self.trigger_level_spinbox.setRange(-10.0, 10.0)
+        self.trigger_level_spinbox.setDecimals(3)
+        self.trigger_level_spinbox.setSingleStep(0.001)
+        self.trigger_level_spinbox.setSuffix(" V")
+        self.trigger_level_spinbox.setValue(0.0)
+        trigger_level_layout.addWidget(self.trigger_level_spinbox)
+        trigger_layout.addLayout(trigger_level_layout)
+        
+        # Trigger edge selection
+        trigger_edge_layout = QtWidgets.QHBoxLayout()
+        trigger_edge_layout.addWidget(QtWidgets.QLabel("Edge:"))
+        self.trigger_edge_combo = QtWidgets.QComboBox()
+        self.trigger_edge_combo.addItems(['Rising', 'Falling'])
+        trigger_edge_layout.addWidget(self.trigger_edge_combo)
+        trigger_layout.addLayout(trigger_edge_layout)
+        
+        # Auto level button
+        self.auto_level_button = QtWidgets.QPushButton("Auto Level")
+        trigger_layout.addWidget(self.auto_level_button)
+        
+        # Trigger status display
+        self.trigger_status_label = QtWidgets.QLabel("Disabled")
+        self.trigger_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
+        trigger_layout.addWidget(self.trigger_status_label)
+        
+        trigger_group_box.setLayout(trigger_layout)
 
         # --- Fixed Run Controls ---
         run_group_box = QtWidgets.QGroupBox("Fixed-Duration Run")
@@ -436,6 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         locked_coord_group.setLayout(locked_coord_layout)
 
         control_layout.addWidget(streaming_group_box)
+        control_layout.addWidget(trigger_group_box)
         control_layout.addWidget(run_group_box)
         control_layout.addWidget(locked_coord_group)
         # --- Live Statistics Display ---
@@ -461,15 +819,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.setLabel('left', "Voltage", units='V')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setYRange(-0.5, 0.5)
+        self.plot_widget.setXRange(0, 1.0)  # Set initial X range to avoid overflow warnings
 
         # --- Desmos-style Hover Elements (live plot only) ---
         self.hover_marker = pg.ScatterPlotItem([], [], pxMode=True, size=10, pen=pg.mkPen('w'), brush=pg.mkBrush(255, 255, 255, 120))
         self.locked_marker = pg.ScatterPlotItem([], [], pxMode=True, size=12, pen=pg.mkPen('w'), brush=pg.mkBrush('b'))
         self.coord_text = pg.TextItem(text='', color=(200, 200, 200), anchor=(-0.1, 1.2))
         
+        # --- Trigger Visualization ---
+        self.trigger_line = pg.InfiniteLine(angle=0, pen=pg.mkPen('r', width=2, style=QtCore.Qt.PenStyle.DashLine))
+        self.trigger_line.setVisible(False)
+        self.trigger_markers = pg.ScatterPlotItem([], [], pxMode=True, size=8, pen=pg.mkPen('r'), brush=pg.mkBrush('r'))
+        
         self.plot_widget.addItem(self.hover_marker)
         self.plot_widget.addItem(self.locked_marker)
         self.plot_widget.addItem(self.coord_text)
+        self.plot_widget.addItem(self.trigger_line)
+        self.plot_widget.addItem(self.trigger_markers)
         
         plots_container.addWidget(self.plot_widget)
 
@@ -503,6 +869,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Connect plot interaction signals
         self.plot_widget.scene().sigMouseMoved.connect(self.update_crosshair)
         self.plot_widget.scene().sigMouseClicked.connect(self.plot_clicked)
+
+        # Connect trigger controls
+        self.trigger_enable_button.toggled.connect(self.on_trigger_enable_changed)
+        self.trigger_mode_combo.currentTextChanged.connect(self.on_trigger_mode_changed)
+        self.trigger_level_spinbox.valueChanged.connect(self.on_trigger_level_changed)
+        self.trigger_edge_combo.currentTextChanged.connect(self.on_trigger_edge_changed)
+        self.auto_level_button.clicked.connect(self.on_auto_level_clicked)
 
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
@@ -590,6 +963,67 @@ class MainWindow(QtWidgets.QMainWindow):
             self.locked_marker.setData([], [])
             self.locked_coord_label.setText("Time: --\nVoltage: --")
 
+    # --- Trigger Control Methods ---
+    
+    def on_trigger_enable_changed(self, enabled):
+        """Handle trigger enable/disable"""
+        self.trigger_enabled = enabled
+        self.trigger_line.setVisible(enabled)
+        
+        if enabled:
+            # Auto-start live view when trigger is enabled
+            if not self.start_button.isChecked():
+                self.start_button.setChecked(True)
+                self.start_streaming()
+            
+            self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | Starting...")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
+        else:
+            self.trigger_status_label.setText("Disabled")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
+            self.trigger_markers.setData([], [])
+            
+    def on_trigger_mode_changed(self, mode_text):
+        """Handle trigger mode change"""
+        mode_map = {
+            'Auto': 'auto',
+            'Peak': 'peak', 
+            'Zero Cross': 'zero_cross',
+            'Edge': 'edge',
+            'Hysteresis': 'hysteresis'
+        }
+        self.trigger_system.set_trigger_mode(mode_map[mode_text])
+        
+        if self.trigger_enabled:
+            self.trigger_status_label.setText(f"Status: {mode_text}")
+            
+    def on_trigger_level_changed(self, level):
+        """Handle trigger level change"""
+        self.trigger_system.set_trigger_level(level)
+        self.trigger_line.setPos(level)
+        
+    def on_trigger_edge_changed(self, edge_text):
+        """Handle trigger edge change"""
+        self.trigger_system.edge = edge_text.lower()
+        
+    def on_auto_level_clicked(self):
+        """Auto-set trigger level based on current data"""
+        if hasattr(self, 'voltage_buffer') and self.total_samples_received > 0:
+            # Use recent data for auto-level
+            recent_samples = min(1000, self.total_samples_received)
+            end_ptr = self.buffer_ptr
+            start_ptr = (end_ptr - recent_samples + self.max_plot_points) % self.max_plot_points
+            
+            if start_ptr < end_ptr:
+                recent_data = self.voltage_buffer[start_ptr:end_ptr]
+            else:
+                recent_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
+                
+            if len(recent_data) > 0:
+                auto_level = np.mean([np.min(recent_data), np.max(recent_data)])
+                self.trigger_level_spinbox.setValue(auto_level)
+                self.trigger_system.auto_level = True
+
     @QtCore.pyqtSlot(bool)
     def toggle_streaming(self, checked):
         if checked:
@@ -604,6 +1038,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_fixed_run = False
         self.run_button.setEnabled(False)  # Disable run button
         self.reset_and_clear_buffers()
+        
+        # Clear any existing DMA errors before starting
+        try:
+            self.driver.stop_adc_streaming()
+            time.sleep(0.001)  # Brief pause to ensure clean state
+        except:
+            pass  # Ignore errors when stopping (might not be running)
         
         dec_rate = compute_decimation(self.time_scale_s)
         self.driver.set_decimation_rate(dec_rate)
@@ -791,7 +1232,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(np.ndarray)
     def update_run_plot(self, new_data):
         """Append new data during fixed-run and update the plot efficiently."""
-        if self.freeze_checkbox.isChecked():
+        if self.freeze_button.isChecked():
             return
         n_new = new_data.size
         if n_new == 0:
@@ -846,7 +1287,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(np.ndarray)
     def update_live_plot(self, new_data):
         """Append new data to the circular buffer and update the live plot efficiently."""
-        if self.freeze_checkbox.isChecked():
+        if self.freeze_button.isChecked():
             return
         n_new = new_data.size
         if n_new == 0:
@@ -861,9 +1302,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.buffer_ptr = (start_idx + n_new) % self.max_plot_points
         self.total_samples_received += n_new
 
-        x_data, y_data = self._get_decimated_window()
-        self.plot_widget.setXRange(0, self.time_scale_s, padding=0)
+        # Get data for display
+        if self.trigger_enabled:
+            # Use triggered display
+            x_data, y_data = self._get_triggered_window()
+            
+            # Set optimal X range based on detected period
+            if self.trigger_enabled and len(x_data) > 0:
+                # Use the actual data range instead of theoretical period calculation
+                self.plot_widget.setXRange(0, x_data[-1], padding=0.02)
+            elif len(x_data) > 0:
+                self.plot_widget.setXRange(0, x_data[-1], padding=0.05)
+        else:
+            # Use normal rolling display
+            x_data, y_data = self._get_decimated_window()
+            self.plot_widget.setXRange(0, self.time_scale_s, padding=0)
+            
         self.plot_curve.setData(x=x_data, y=y_data)
+
+        # Update trigger visualization
+        if self.trigger_enabled and len(y_data) > 0:
+            self._update_trigger_display(x_data, y_data)
+        else:
+            # Clear trigger markers when not enabled
+            self.trigger_markers.setData([], [])
 
         if y_data.size > 0:
             ymin = float(np.min(y_data))
@@ -872,6 +1334,148 @@ class MainWindow(QtWidgets.QMainWindow):
             p2p  = ymax - ymin
             self.stats_label.setText(
                 f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V")
+                
+    def _get_triggered_window(self):
+        """Get triggered window of data for display"""
+        # Get recent data for trigger analysis
+        window_samples = int(self.time_scale_s * self.sample_rate * 1.5)  # 1.5x for trigger analysis
+        available = min(window_samples, self.total_samples_received)
+        
+        if available < 100:
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+            
+        end_ptr = self.buffer_ptr
+        start_ptr = (end_ptr - available + self.max_plot_points) % self.max_plot_points
+        
+        # Extract data for trigger analysis
+        if start_ptr < end_ptr:
+            voltage_data = self.voltage_buffer[start_ptr:end_ptr]
+            time_data = self.time_buffer[start_ptr:end_ptr]
+        else:
+            voltage_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
+            time_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
+            
+        # Get triggered window
+        triggered_voltage, offset = self.trigger_system.get_triggered_window(voltage_data, window_periods=2.0)
+        
+        if len(triggered_voltage) == 0:
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+            
+        triggered_time = time_data[offset:offset+len(triggered_voltage)]
+        
+        # Center the display around the trigger point and scale appropriately
+        if self.trigger_system.detected_period is not None:
+            # Calculate optimal display window based on detected period
+            period_time = self.trigger_system.detected_period / self.sample_rate
+            display_periods = 2.5  # Show 2.5 periods for good context
+            optimal_window_time = display_periods * period_time
+            
+            # Find trigger points in the triggered data
+            triggers = self.trigger_system.find_triggers(triggered_voltage)
+            
+            if len(triggers) > 0:
+                # Use the first trigger as the starting point for clean period display
+                start_trigger_idx = triggers[0]
+                start_time = triggered_time[start_trigger_idx] if start_trigger_idx < len(triggered_time) else triggered_time[0]
+                
+                # Calculate window bounds starting from the first trigger
+                end_time = start_time + optimal_window_time
+                
+                # Find indices corresponding to this time window
+                time_mask = (triggered_time >= start_time) & (triggered_time <= end_time)
+                
+                if np.any(time_mask):
+                    final_voltage = triggered_voltage[time_mask]
+                    final_time = triggered_time[time_mask]
+                    
+                    # Normalize time to start from 0
+                    if len(final_time) > 0:
+                        final_time = final_time - final_time[0]
+                else:
+                    # Fallback if masking fails
+                    final_voltage = triggered_voltage
+                    final_time = triggered_time - triggered_time[0]
+            else:
+                # No triggers found, use original data
+                final_voltage = triggered_voltage
+                final_time = triggered_time - triggered_time[0]
+        else:
+            # No period detected, use original approach
+            final_voltage = triggered_voltage
+            final_time = triggered_time - triggered_time[0] if len(triggered_time) > 0 else triggered_time
+            
+        # Downsample if needed
+        if len(final_voltage) > self.MAX_POINTS_TO_PLOT:
+            stride = len(final_voltage) // self.MAX_POINTS_TO_PLOT
+            final_voltage = final_voltage[::stride]
+            final_time = final_time[::stride]
+            
+        return final_time, final_voltage
+        
+    def _update_trigger_display(self, x_data, y_data):
+        """Update trigger visualization on the plot"""
+        if len(y_data) == 0:
+            return
+            
+        # Update trigger level line
+        self.trigger_line.setPos(self.trigger_system.level)
+        
+        # Find and display trigger points
+        triggers = self.trigger_system.find_triggers(y_data)
+        
+        if len(triggers) > 0 and len(x_data) > max(triggers):
+            trigger_times = x_data[triggers]
+            trigger_voltages = y_data[triggers]
+            self.trigger_markers.setData(trigger_times, trigger_voltages)
+            
+            # Update status with period info
+            if self.trigger_system.detected_period is not None:
+                period_samples = self.trigger_system.detected_period
+                period_time = period_samples / self.sample_rate if self.sample_rate > 0 else 0
+                
+                # Calculate frequency with error handling
+                if period_time > 0 and not np.isnan(period_time) and np.isfinite(period_time):
+                    frequency = 1.0 / period_time
+                else:
+                    frequency = 0
+                
+                # Debug logging for frequency calculation
+                if DEBUG_ENABLED:
+                    logger.debug(f"Frequency calc: period_samples={period_samples}, sample_rate={self.sample_rate}, period_time={period_time}, freq={frequency}")
+                
+                # Format frequency appropriately with error handling
+                if np.isnan(frequency) or not np.isfinite(frequency):
+                    freq_str = "NaN"
+                elif frequency >= 1000:
+                    freq_str = f"{frequency/1000:.2f}kHz"
+                elif frequency >= 1:
+                    freq_str = f"{frequency:.1f}Hz"
+                elif frequency > 0:
+                    freq_str = f"{frequency*1000:.1f}mHz"
+                else:
+                    freq_str = "0Hz"
+                    
+                # Debug logging for frequency formatting
+                if DEBUG_ENABLED:
+                    logger.debug(f"Frequency formatting: freq={frequency}, freq_str='{freq_str}'")
+                
+                status_text = f"{self.trigger_system.mode.title()} | Period: {period_time*1000:.1f}ms | Freq: {freq_str}"
+                self.trigger_status_label.setText(status_text)
+                
+                # Debug logging for final status text
+                if DEBUG_ENABLED:
+                    logger.debug(f"Final status text: '{status_text}'")
+                
+                # Update the trigger status color to indicate active triggering
+                self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
+            else:
+                self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | Searching...")
+                self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
+        else:
+            self.trigger_markers.setData([], [])
+            if self.trigger_enabled:
+                self.trigger_status_label.setText(f"{self.trigger_system.mode.title()} | No triggers")
+                self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
 
 def main():
     """Main function to run the application."""
