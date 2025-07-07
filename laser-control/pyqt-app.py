@@ -102,98 +102,164 @@ class CurrentRamp:
 # --- Triggering System ---
 
 class TriggerSystem:
-    """Advanced oscilloscope-like triggering system."""
+    """Simple, reliable oscilloscope-like triggering system."""
     
     def __init__(self):
         self.mode = 'auto'  # 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis'
         self.level = 0.0
         self.edge = 'rising'  # 'rising', 'falling'
-        self.hysteresis = 0.01  # For hysteresis mode
         self.auto_level = True
-        self.holdoff_samples = 100  # Minimum samples between triggers
-        self.periods_to_display = 2.0  # Default number of periods to show
+        self.periods_to_display = 2.0
         
-        # Period detection
+        # Simple period detection
         self.detected_period = None
         self.period_history = []
-        self.max_period_history = 10
+        self.max_period_history = 5  # Reduced for faster response
+        
+        # Timeout tracking for automatic reset
+        self.last_successful_trigger_time = None
+        self.trigger_timeout_seconds = 3.0  # Reset if no triggers for 3 seconds
+        
+    def reset_trigger_system(self):
+        """Reset trigger system - clear period history and detected period"""
+        self.detected_period = None
+        self.period_history = []
+        print("Trigger system reset - period detection cleared")
         
     def set_trigger_mode(self, mode):
-        """Set trigger mode: 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis'"""
+        """Set trigger mode and reset period detection"""
         self.mode = mode
+        # Reset period detection when mode changes to avoid stale data
+        self.reset_trigger_system()
         
     def set_trigger_level(self, level):
-        """Set trigger level (fraction of signal range)"""
+        """Set trigger level"""
         self.level = level
         self.auto_level = False
         
-    def auto_set_level(self, data):
-        """Automatically set trigger level to 50% of signal range"""
-        if self.auto_level:
+    def update_auto_level(self, data):
+        """Update auto level only when explicitly called"""
+        if self.auto_level and len(data) > 0:
             data_min, data_max = np.min(data), np.max(data)
             self.level = (data_min + data_max) / 2
             
-    def find_peaks_robust(self, data, min_height_ratio=0.3, min_distance_ratio=0.1):
-        """Find peaks with adaptive thresholds"""
-        data_range = np.max(data) - np.min(data)
-        min_height = np.min(data) + min_height_ratio * data_range
-        
-        # Adaptive minimum distance - scale with data length for high frequencies
-        # For high-frequency signals, we need smaller distances
-        base_distance = int(min_distance_ratio * len(data))
-        min_distance = max(5, min(base_distance, len(data) // 20))  # At least 5, max 1/20 of data length
-        
-        from scipy.signal import find_peaks
-        peaks, properties = find_peaks(data, height=min_height, distance=min_distance)
-        return peaks, properties
-        
-    def find_zero_crossings(self, data, threshold=None, edge='rising'):
-        """Find zero crossings or threshold crossings"""
-        if threshold is None:
-            threshold = self.level
-            
-        # Ensure we have enough data
-        if len(data) < 2:
-            return np.array([])
-            
-        if edge == 'rising':
-            crossings = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
-        elif edge == 'falling':
-            crossings = np.where((data[:-1] >= threshold) & (data[1:] < threshold))[0]
-        else:  # both
-            rising = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
-            falling = np.where((data[:-1] >= threshold) & (data[1:] < threshold))[0]
-            crossings = np.sort(np.concatenate([rising, falling]))
-            
-        return crossings + 1  # +1 because we check data[1:]
-        
-    def hysteresis_trigger(self, data, low_thresh=None, high_thresh=None):
-        """Hysteresis triggering to avoid noise"""
-        if len(data) < 2:
-            return np.array([])
-            
-        if low_thresh is None:
+    def find_peaks_simple(self, data):
+        """Simple peak detection with error handling"""
+        try:
+            if len(data) < 10:
+                return np.array([])
+                
             data_range = np.max(data) - np.min(data)
             if data_range == 0:
                 return np.array([])
                 
-            # Adaptive hysteresis based on signal characteristics
-            # For high-frequency signals, use smaller hysteresis
-            # For noisy signals, use larger hysteresis
-            noise_estimate = np.std(np.diff(data))  # Estimate noise from derivative
-            signal_estimate = data_range
+            min_height = np.min(data) + 0.3 * data_range
             
-            if signal_estimate > 0:
-                noise_ratio = noise_estimate / signal_estimate
-                # Scale hysteresis: more noise = more hysteresis, but keep it reasonable
-                adaptive_hysteresis = max(0.005, min(0.05, self.hysteresis + noise_ratio * 0.02))
+            # Adaptive minimum distance based on detected period
+            if self.detected_period is not None:
+                # Check if we haven't had successful triggers recently (frequency decrease scenario)
+                import time
+                if (self.last_successful_trigger_time is not None and 
+                    time.time() - self.last_successful_trigger_time > 1.0):  # No triggers for 1 second
+                    # Use more conservative distance to allow longer periods
+                    min_distance = max(10, len(data) // 100)  # Much smaller distance
+                    print("Using conservative distance for potential frequency decrease")
+                else:
+                    # Use 1/4 of the detected period as minimum distance
+                    min_distance = max(10, self.detected_period // 4)
+                    # For very long periods, cap the minimum distance to prevent excessive spacing
+                    min_distance = min(min_distance, len(data) // 10)
             else:
-                adaptive_hysteresis = self.hysteresis
-                
-            hysteresis_amount = adaptive_hysteresis * data_range
-            low_thresh = self.level - hysteresis_amount / 2
-            high_thresh = self.level + hysteresis_amount / 2
+                # Fallback: scale with data length
+                min_distance = max(10, len(data) // 50)
             
+            from scipy.signal import find_peaks
+            peaks, _ = find_peaks(data, height=min_height, distance=min_distance)
+            return peaks
+            
+        except Exception as e:
+            print(f"Error in peak detection: {e}")
+            return np.array([])
+        
+    def find_zero_crossings_simple(self, data):
+        """Simple zero crossing detection with error handling"""
+        try:
+            if len(data) < 2:
+                return np.array([])
+                
+            threshold = self.level
+            
+            if self.edge == 'rising':
+                crossings = np.where((data[:-1] <= threshold) & (data[1:] > threshold))[0]
+            elif self.edge == 'falling':
+                crossings = np.where((data[:-1] >= threshold) & (data[1:] < threshold))[0]
+            else:
+                return np.array([])
+                
+            return crossings + 1
+            
+        except Exception as e:
+            print(f"Error in zero crossing detection: {e}")
+            return np.array([])
+        
+    def find_edges_simple(self, data):
+        """Simple edge detection using derivative with error handling"""
+        try:
+            if len(data) < 3:
+                return np.array([])
+                
+            derivative = np.diff(data)
+            deriv_std = np.std(derivative)
+            
+            if deriv_std == 0:
+                return np.array([])
+                
+            threshold = deriv_std  # Simple threshold
+            
+            # Adaptive minimum distance based on detected period
+            if self.detected_period is not None:
+                # Check if we haven't had successful triggers recently (frequency decrease scenario)
+                import time
+                if (self.last_successful_trigger_time is not None and 
+                    time.time() - self.last_successful_trigger_time > 1.0):  # No triggers for 1 second
+                    # Use more conservative distance to allow longer periods
+                    min_distance = max(10, len(data) // 100)  # Much smaller distance
+                    print("Edge detection using conservative distance for potential frequency decrease")
+                else:
+                    # Use 1/4 of the detected period as minimum distance
+                    min_distance = max(10, self.detected_period // 4)
+                    # For very long periods, cap the minimum distance to prevent excessive spacing
+                    min_distance = min(min_distance, len(data) // 10)
+            else:
+                # Fallback: scale with data length
+                min_distance = max(10, len(data) // 50)
+            
+            from scipy.signal import find_peaks
+            if self.edge == 'rising':
+                edges, _ = find_peaks(derivative, height=threshold, distance=min_distance)
+            else:
+                edges, _ = find_peaks(-derivative, height=threshold, distance=min_distance)
+                
+            return edges
+            
+        except Exception as e:
+            print(f"Error in edge detection: {e}")
+            return np.array([])
+        
+    def hysteresis_simple(self, data):
+        """Simple hysteresis trigger"""
+        if len(data) < 2:
+            return np.array([])
+            
+        data_range = np.max(data) - np.min(data)
+        if data_range == 0:
+            return np.array([])
+            
+        # Fixed hysteresis amount - no adaptive complexity
+        hyst_amount = 0.02 * data_range  # 2% of signal range
+        low_thresh = self.level - hyst_amount
+        high_thresh = self.level + hyst_amount
+        
         state = 'low'
         triggers = []
         
@@ -206,228 +272,313 @@ class TriggerSystem:
                 
         return np.array(triggers)
         
-    def detect_period_autocorr(self, data, max_period_ratio=0.8):
-        """Detect period using autocorrelation"""
-        if len(data) < 100:
+    def find_hysteresis_triggers(self, data):
+        """Hysteresis triggering - simple and stable with error handling"""
+        try:
+            if len(data) < 10:
+                return np.array([])
+                
+            # Simple hysteresis: 5% of signal range
+            data_range = np.max(data) - np.min(data)
+            if data_range == 0:
+                return np.array([])
+                
+            hysteresis = 0.05 * data_range
+            high_thresh = self.level + hysteresis
+            low_thresh = self.level - hysteresis
+            
+            triggers = []
+            state = 'low' if data[0] < self.level else 'high'
+            
+            for i in range(1, len(data)):
+                if state == 'low' and data[i] > high_thresh:
+                    triggers.append(i)
+                    state = 'high'
+                elif state == 'high' and data[i] < low_thresh:
+                    state = 'low'
+                    
+            return np.array(triggers)
+            
+        except Exception as e:
+            print(f"Error in hysteresis detection: {e}")
+            return np.array([])
+        
+    def detect_period_simple(self, data):
+        """Simple period detection using autocorrelation with error handling"""
+        try:
+            if len(data) < 50:  # Reduced from 100 for better low-frequency support
+                return None
+                
+            # Timeout protection
+            import time
+            start_time = time.time()
+            max_processing_time = 0.05  # 50ms max for autocorrelation
+            
+            # Limit data size to prevent excessive computation
+            if len(data) > 200000:  # > 2 seconds at 100kHz
+                print(f"Warning: Data too large for autocorrelation ({len(data)} samples), skipping")
+                return None
+                
+            # For very long data (likely low frequency), use decimation for efficiency
+            # Adjust threshold for 3-5Hz range
+            if len(data) > 20000:  # > 0.2 seconds at 100kHz (covers 3-5Hz range better)
+                # Decimate by factor of 5 for better resolution in 3-5Hz range
+                decimated_data = data[::5]
+                decimation_factor = 5
+            elif len(data) > 50000:  # > 0.5 seconds at 100kHz
+                # Decimate by factor of 10 for very low frequencies
+                decimated_data = data[::10]
+                decimation_factor = 10
+            else:
+                decimated_data = data
+                decimation_factor = 1
+                
+            # Check timeout after decimation
+            if time.time() - start_time > max_processing_time:
+                print("Warning: Autocorrelation timeout during decimation")
+                return None
+                
+            # Simple autocorrelation
+            data_centered = decimated_data - np.mean(decimated_data)
+            
+            # Prevent division by zero
+            if np.std(data_centered) == 0:
+                return None
+                
+            autocorr = np.correlate(data_centered, data_centered, mode='full')
+            autocorr = autocorr[len(autocorr)//2:]
+            
+            if autocorr[0] == 0:
+                return None
+                
+            autocorr = autocorr / autocorr[0]
+            
+            # Check timeout after autocorrelation
+            if time.time() - start_time > max_processing_time:
+                print("Warning: Autocorrelation timeout during correlation")
+                return None
+            
+            # Adaptive search range based on data length
+            min_period = 3  # Reduced minimum period for better 3-5Hz detection
+            max_period = min(len(decimated_data) // 2, len(autocorr) - 1)  # Increased to 1/2 of data length
+            
+            if max_period <= min_period:
+                return None
+                
+            search_range = autocorr[min_period:max_period]
+            if len(search_range) < 5:
+                return None
+                
+            from scipy.signal import find_peaks
+            # Lower threshold and smaller distance for better detection in 3-5Hz range
+            peaks, _ = find_peaks(search_range, height=0.15, distance=3)
+            
+            if len(peaks) > 0:
+                # Convert back to original sample rate
+                detected_period = (peaks[0] + min_period) * decimation_factor
+                return detected_period
+                
             return None
             
-        # Remove DC component
-        data_centered = data - np.mean(data)
-        
-        # Autocorrelation
-        autocorr = np.correlate(data_centered, data_centered, mode='full')
-        autocorr = autocorr[len(autocorr)//2:]
-        
-        # Normalize
-        autocorr = autocorr / autocorr[0]
-        
-        # Find peaks, excluding the zero-lag peak
-        max_period = int(max_period_ratio * len(data))
-        search_range = autocorr[10:max_period]  # Skip first few samples
-        
-        if len(search_range) < 10:
+        except Exception as e:
+            print(f"Error in period detection: {e}")
             return None
-            
-        from scipy.signal import find_peaks
-        peaks, _ = find_peaks(search_range, height=0.3, distance=20)
-        
-        if len(peaks) > 0:
-            period = peaks[0] + 10  # Add back the offset
-            return period
-            
-        return None
         
     def update_period_estimate(self, new_period):
-        """Update period estimate with smoothing"""
-        if new_period is not None:
+        """Update period estimate with simple smoothing and validation"""
+        if new_period is not None and new_period > 0:
+            # Validate new period against existing history
+            if len(self.period_history) > 0:
+                median_period = np.median(self.period_history)
+                # More aggressive change detection for frequency switches (>20% change)
+                period_change_ratio = abs(new_period - median_period) / median_period
+                if period_change_ratio > 0.2:  # 20% change threshold
+                    print(f"Significant period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
+                    self.period_history = []
+            
             self.period_history.append(new_period)
             if len(self.period_history) > self.max_period_history:
                 self.period_history.pop(0)
                 
-            # Use median for robustness
+            # Simple median for robustness
             self.detected_period = int(np.median(self.period_history))
             
-            # Debug logging
-            if DEBUG_ENABLED:
-                import logging
-                logger = logging.getLogger('LaserControl')
-                logger.debug(f"Period update: new={new_period}, history={self.period_history}, detected={self.detected_period}")
-            
     def find_triggers(self, data):
-        """Main trigger detection function"""
-        if len(data) < 50:
-            return np.array([])
+        """Main trigger detection - simplified and predictable with error handling"""
+        try:
+            if len(data) < 50:
+                return np.array([])
+                
+            # Timeout protection - limit processing time
+            import time
+            start_time = time.time()
+            max_processing_time = 0.1  # 100ms max processing time
             
-        self.auto_set_level(data)
-        
-        if self.mode == 'auto':
-            # Try different methods and pick the best
-            triggers = self._auto_trigger(data)
-        elif self.mode == 'peak':
-            peaks, _ = self.find_peaks_robust(data)
-            triggers = peaks
-        elif self.mode == 'zero_cross':
-            triggers = self.find_zero_crossings(data, edge=self.edge)
-        elif self.mode == 'edge':
-            # Use derivative for edge detection
-            derivative = np.diff(data)
-            if len(derivative) == 0:
+            # Get triggers based on mode
+            if self.mode == 'auto':
+                triggers = self._auto_trigger_simple(data)
+            elif self.mode == 'peak':
+                triggers = self.find_peaks_simple(data)
+            elif self.mode == 'zero_cross':
+                triggers = self.find_zero_crossings_simple(data)
+            elif self.mode == 'edge':
+                triggers = self.find_edges_simple(data)
+            elif self.mode == 'hysteresis':
+                triggers = self.find_hysteresis_triggers(data)
+            else:
                 triggers = np.array([])
-            else:
-                # Adaptive threshold based on derivative statistics
-                deriv_std = np.std(derivative)
-                if deriv_std > 0:
-                    # Use a threshold that's proportional to the derivative's standard deviation
-                    threshold = max(0.5 * deriv_std, 0.1 * np.max(np.abs(derivative)))
-                    
-                    # Adaptive distance for high-frequency signals
-                    adaptive_distance = max(5, min(self.holdoff_samples, len(data) // 50))
-                    
-                    if self.edge == 'rising':
-                        from scipy.signal import find_peaks
-                        edge_points, _ = find_peaks(derivative, height=threshold, distance=adaptive_distance)
+            
+            # Check for timeout
+            if time.time() - start_time > max_processing_time:
+                print(f"Warning: Trigger processing timeout for mode {self.mode}")
+                return np.array([])
+                
+            # Ensure triggers is a numpy array
+            if not isinstance(triggers, np.ndarray):
+                triggers = np.array(triggers)
+                
+            # Sanity check on triggers
+            if len(triggers) > len(data) // 2:
+                print(f"Warning: Too many triggers detected ({len(triggers)}), clearing")
+                triggers = np.array([])
+                
+            # Adaptive holdoff based on detected period
+            if len(triggers) > 1:
+                # Use period-based holdoff if available
+                if self.detected_period is not None:
+                    # More conservative holdoff for 3-5Hz range
+                    if self.detected_period > 20000:  # > 0.2 seconds (< 5Hz)
+                        min_distance = max(20, self.detected_period // 10)  # 1/10 of period for low freq
                     else:
-                        from scipy.signal import find_peaks
-                        edge_points, _ = find_peaks(-derivative, height=threshold, distance=adaptive_distance)
-                    triggers = edge_points
+                        min_distance = max(10, self.detected_period // 8)  # 1/8 of period for higher freq
                 else:
-                    triggers = np.array([])
-            
-        elif self.mode == 'hysteresis':
-            triggers = self.hysteresis_trigger(data)
-        else:
-            triggers = np.array([])
-            
-        # Apply holdoff
-        if len(triggers) > 1:
-            # Adaptive holdoff based on data characteristics
-            # For high-frequency signals, use smaller holdoff
-            # For low-frequency signals, use larger holdoff
-            if self.detected_period is not None:
-                # Use a fraction of the detected period as holdoff
-                adaptive_holdoff = max(5, min(self.holdoff_samples, self.detected_period // 4))
+                    min_distance = 20  # Fixed minimum distance as fallback
+                    
+                filtered_triggers = [triggers[0]]
+                for trigger in triggers[1:]:
+                    if trigger - filtered_triggers[-1] >= min_distance:
+                        filtered_triggers.append(trigger)
+                triggers = np.array(filtered_triggers)
+                
+            # Update period estimate
+            if len(triggers) >= 2:
+                periods = np.diff(triggers)
+                if len(periods) > 0:
+                    avg_period = np.median(periods)
+                    self.update_period_estimate(avg_period)
+                    # Update successful trigger time
+                    import time
+                    self.last_successful_trigger_time = time.time()
+            elif len(triggers) == 0:
+                # Check for timeout and reset if needed
+                import time
+                current_time = time.time()
+                if (self.last_successful_trigger_time is not None and 
+                    current_time - self.last_successful_trigger_time > self.trigger_timeout_seconds):
+                    print("Trigger timeout - automatically resetting trigger system")
+                    self.reset_trigger_system()
+                    self.last_successful_trigger_time = current_time
+                
+                # Only try autocorrelation if no triggers found and data is reasonable size
+                if len(data) < 100000:  # Prevent excessive computation
+                    period = self.detect_period_simple(data)
+                    self.update_period_estimate(period)
             else:
-                # Fallback: scale holdoff with data length
-                adaptive_holdoff = max(5, min(self.holdoff_samples, len(data) // 100))
-                
-            filtered_triggers = [triggers[0]]
-            for trigger in triggers[1:]:
-                if trigger - filtered_triggers[-1] >= adaptive_holdoff:
-                    filtered_triggers.append(trigger)
-            triggers = np.array(filtered_triggers)
-            
-        # Update period estimate
-        if len(triggers) >= 2:
-            periods = np.diff(triggers)
-            avg_period = np.median(periods)
-            self.update_period_estimate(avg_period)
-        else:
-            # Try autocorrelation for period detection when we don't have enough triggers
-            # This ensures all modes can show frequency/period information
-            period = self.detect_period_autocorr(data)
-            self.update_period_estimate(period)
-            
-        return triggers
-        
-    def _auto_trigger(self, data):
-        """Automatic trigger mode - tries multiple methods"""
-        if len(data) < 10:
-            return np.array([])
-            
-        # Try peak detection first (good for triangular/sawtooth waves)
-        peaks, properties = self.find_peaks_robust(data)
-        
-        if len(peaks) >= 2:
-            # Check if peaks are reasonably periodic
-            periods = np.diff(peaks)
-            if len(periods) > 0:
-                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-                
-                if period_std < 0.3:  # Less than 30% variation
-                    return peaks
-        
-        # For triangular waves, try finding valleys (negative peaks) as well
-        valleys, _ = self.find_peaks_robust(-data)  # Invert signal to find valleys
-        
-        if len(valleys) >= 2:
-            periods = np.diff(valleys)
-            if len(periods) > 0:
-                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-                
-                if period_std < 0.3:
-                    return valleys
+                # Single trigger found - update time but don't update period
+                import time
+                self.last_successful_trigger_time = time.time()
                     
-        # Try zero crossing if peaks/valleys aren't good
-        crossings = self.find_zero_crossings(data, edge='rising')
-        if len(crossings) >= 2:
-            periods = np.diff(crossings)
-            if len(periods) > 0:
-                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-                
-                if period_std < 0.4:  # Slightly more tolerant for zero crossings
-                    return crossings
+            return triggers
             
-        # Try falling edge zero crossings
-        crossings = self.find_zero_crossings(data, edge='falling')
-        if len(crossings) >= 2:
-            periods = np.diff(crossings)
-            if len(periods) > 0:
-                period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-                
-                if period_std < 0.4:
-                    return crossings
-                    
-        # Try edge detection for square waves
-        derivative = np.diff(data)
-        if len(derivative) > 0:
-            deriv_std = np.std(derivative)
-            if deriv_std > 0:
-                threshold = max(0.5 * deriv_std, 0.1 * np.max(np.abs(derivative)))
-                adaptive_distance = max(5, min(self.holdoff_samples, len(data) // 50))
-                
-                from scipy.signal import find_peaks
-                rising_edges, _ = find_peaks(derivative, height=threshold, distance=adaptive_distance)
-                
-                if len(rising_edges) >= 2:
-                    periods = np.diff(rising_edges)
-                    if len(periods) > 0:
-                        period_std = np.std(periods) / np.mean(periods) if np.mean(periods) > 0 else float('inf')
-                        
-                        if period_std < 0.4:
-                            return rising_edges
-             
-        # Fallback to hysteresis
-        return self.hysteresis_trigger(data)
+        except Exception as e:
+            print(f"Error in trigger detection: {e}")
+            return np.array([])  # Return empty array on any error
         
-    def get_triggered_window(self, data, window_periods=2.0):
-        """Get a window of data centered on trigger with specified number of periods"""
-        triggers = self.find_triggers(data)
+    def _auto_trigger_simple(self, data):
+        """Simple auto trigger - try only 3 methods with frequency decrease handling"""
+        # Check if we're in a potential frequency decrease scenario
+        import time
+        frequency_decrease_mode = (self.last_successful_trigger_time is not None and 
+                                 time.time() - self.last_successful_trigger_time > 1.0)
         
+        if frequency_decrease_mode:
+            print("Auto-trigger: Potential frequency decrease detected, trying all methods")
+            
+        # For low frequencies (detected period > 0.2 seconds), try hysteresis first
+        if self.detected_period is not None and self.detected_period > 20000:  # > 0.2 seconds at 100kHz (< 5Hz)
+            # Try hysteresis first for low frequencies (including 3-5Hz range)
+            hysteresis = self.find_hysteresis_triggers(data)
+            if len(hysteresis) >= 1:
+                return hysteresis
+        
+        # Try peaks first (but be more lenient in frequency decrease mode)
+        peaks = self.find_peaks_simple(data)
+        if len(peaks) >= 2 or (frequency_decrease_mode and len(peaks) >= 1):
+            return peaks
+            
+        # Try zero crossings (be more lenient in frequency decrease mode)
+        crossings = self.find_zero_crossings_simple(data)
+        if len(crossings) >= 2 or (frequency_decrease_mode and len(crossings) >= 1):
+            return crossings
+            
+        # Try hysteresis (always try in frequency decrease mode)
+        hysteresis = self.find_hysteresis_triggers(data)
+        if len(hysteresis) >= 1:
+            return hysteresis
+            
+        # If still nothing and in frequency decrease mode, try edge detection
+        if frequency_decrease_mode:
+            edges = self.find_edges_simple(data)
+            if len(edges) >= 1:
+                return edges
+            
+        return np.array([])
+        
+    def get_triggered_window(self, data, triggers=None, window_periods=None):
+        """Simple triggered window that actually uses triggers"""
+        if window_periods is None:
+            window_periods = self.periods_to_display
+            
+        # If no triggers provided, find them
+        if triggers is None:
+            return data[len(data)//4:3*len(data)//4], len(data)//4  # Fallback to center
+            
         if len(triggers) == 0:
-            # No triggers found, return middle portion
-            start = len(data) // 4
-            end = 3 * len(data) // 4
-            return data[start:end], start
+            return data[len(data)//4:3*len(data)//4], len(data)//4  # Fallback to center
             
-        # Use the middle trigger if multiple found
-        trigger_idx = triggers[len(triggers) // 2]
+        # Use the first trigger as the reference point
+        trigger_idx = triggers[0]
         
         # Determine window size
         if self.detected_period is not None:
             window_size = int(window_periods * self.detected_period)
+            # Ensure window size is reasonable
+            window_size = min(window_size, len(data) // 2)
+            window_size = max(window_size, 100)  # Minimum window size
         else:
-            # Fallback to a reasonable fraction of data
-            window_size = len(data) // 2
+            window_size = len(data) // 3  # Default window
             
-        # Center window on trigger
-        start = max(0, trigger_idx - window_size // 2)
-        end = min(len(data), trigger_idx + window_size // 2)
+        # Start window AT the trigger point for consistent alignment
+        start = trigger_idx
+        end = min(len(data), start + window_size)
+        
+        # If we don't have enough data after the trigger, try the previous trigger
+        if end - start < window_size and len(triggers) > 1:
+            # Try the previous trigger if available
+            prev_trigger = triggers[0] if triggers[0] > window_size else triggers[1] if len(triggers) > 1 else triggers[0]
+            start = max(0, prev_trigger)
+            end = min(len(data), start + window_size)
+        
+        # Ensure we have a minimum window
+        if end - start < 100:
+            start = max(0, trigger_idx - 50)
+            end = min(len(data), start + 100)
         
         return data[start:end], start
         
     def get_status_info(self):
-        """Get trigger status information for display"""
-        info = {
+        """Get trigger status information"""
+        return {
             'mode': self.mode,
             'level': self.level,
             'edge': self.edge,
@@ -435,7 +586,6 @@ class TriggerSystem:
             'auto_level': self.auto_level,
             'periods_to_display': self.periods_to_display
         }
-        return info
 
 # --- Live Window Worker (infinite rolling oscilloscope) ---
 
@@ -444,6 +594,7 @@ class LiveWorker(QtCore.QThread):
     window_ready = QtCore.pyqtSignal(np.ndarray)
     status_changed = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
+    dma_error_occurred = QtCore.pyqtSignal()  # New signal for DMA errors
 
     def __init__(self, driver, sample_rate, window_seconds, guard_pts, refresh_ms=UPDATE_INTERVAL_MS):
         super().__init__()
@@ -519,6 +670,7 @@ class LiveWorker(QtCore.QThread):
                             continue
                         if dma_err:
                             logger.warning("DMA error detected - attempting restart")
+                            self.dma_error_occurred.emit()  # Notify GUI to reset trigger system
                             self.driver.stop_adc_streaming()
                             time.sleep(0.001)  # 1ms delay
                             self.driver.start_adc_streaming()
@@ -684,6 +836,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_system = TriggerSystem()
         self.trigger_enabled = False
         
+        # Stored trigger data to avoid recursive calls
+        self._last_triggers = np.array([])
+        self._last_trigger_data = np.array([])
+        self._last_time_data = np.array([])
+
         # Allocate live buffers sized to current time window plus safety margin
         self.resize_live_buffers()
         self.buffer_ptr = 0
@@ -832,6 +989,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_level_button = QtWidgets.QPushButton("Auto Level")
         trigger_layout.addWidget(self.auto_level_button)
         
+        # Reset trigger button
+        self.reset_trigger_button = QtWidgets.QPushButton("Force Reset")
+        self.reset_trigger_button.setToolTip("Force reset trigger system and clear all period detection")
+        trigger_layout.addWidget(self.reset_trigger_button)
+        
         # Periods to display control
         periods_layout = QtWidgets.QHBoxLayout()
         periods_layout.addWidget(QtWidgets.QLabel("Periods:"))
@@ -974,6 +1136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_edge_combo.currentTextChanged.connect(self.on_trigger_edge_changed)
         self.auto_level_button.clicked.connect(self.on_auto_level_clicked)
         self.periods_spinbox.valueChanged.connect(self.on_periods_changed)
+        self.reset_trigger_button.clicked.connect(self.reset_trigger_system)
 
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
@@ -1074,8 +1237,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.start_button.setChecked(True)
                 self.start_streaming()
             
-            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()}")
-            self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
+            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
         else:
             self.trigger_status_label.setText("Status: Disabled")
             self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
@@ -1093,7 +1256,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_system.set_trigger_mode(mode_map[mode_text])
         
         if self.trigger_enabled:
-            self.trigger_status_label.setText(f"Status: {mode_text}")
+            self.trigger_status_label.setText(f"Status: {mode_text} | Searching...")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
             
     def on_trigger_level_changed(self, level):
         """Handle trigger level change"""
@@ -1118,9 +1282,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 recent_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
                 
             if len(recent_data) > 0:
-                auto_level = np.mean([np.min(recent_data), np.max(recent_data)])
-                self.trigger_level_spinbox.setValue(auto_level)
-                self.trigger_system.auto_level = True
+                # Update the trigger system's auto level
+                self.trigger_system.update_auto_level(recent_data)
+                # Update the GUI to reflect the new level
+                self.trigger_level_spinbox.setValue(self.trigger_system.level)
 
     def on_periods_changed(self):
         """Update the number of periods to display in the triggered window."""
@@ -1159,6 +1324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_worker.window_ready.connect(self.update_live_plot)
         self.live_worker.status_changed.connect(self.status_bar.showMessage)
         self.live_worker.finished.connect(self.on_live_worker_finished)
+        self.live_worker.dma_error_occurred.connect(self.on_dma_error_occurred)
         self.live_worker.start()
 
     def stop_streaming(self):
@@ -1409,12 +1575,18 @@ class MainWindow(QtWidgets.QMainWindow):
             # Use triggered display
             x_data, y_data = self._get_triggered_window()
             
-            # Set optimal X range based on detected period
-            if self.trigger_enabled and len(x_data) > 0:
-                # Use the actual data range instead of theoretical period calculation
+            # Set X range based on triggered window duration
+            if len(x_data) > 0:
+                # For triggered mode, show the exact window we calculated
                 self.plot_widget.setXRange(0, x_data[-1], padding=0.02)
-            elif len(x_data) > 0:
-                self.plot_widget.setXRange(0, x_data[-1], padding=0.05)
+            else:
+                # Fallback if no triggered data
+                if self.trigger_system.detected_period is not None:
+                    period_time = self.trigger_system.detected_period / self.sample_rate
+                    total_time = self.trigger_system.periods_to_display * period_time
+                    self.plot_widget.setXRange(0, total_time, padding=0.02)
+                else:
+                    self.plot_widget.setXRange(0, 1.0, padding=0.02)  # 1 second default
         else:
             # Use normal rolling display
             x_data, y_data = self._get_decimated_window()
@@ -1434,111 +1606,12 @@ class MainWindow(QtWidgets.QMainWindow):
             ymax = float(np.max(y_data))
             rms  = float(np.sqrt(np.mean(np.square(y_data))))
             p2p  = ymax - ymin
-            self.stats_label.setText(
-                f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V")
-                
-    def _get_triggered_window(self):
-        """Get triggered window of data for display"""
-        # Get recent data for trigger analysis
-        window_samples = int(self.time_scale_s * self.sample_rate * self.trigger_system.periods_to_display)
-        available = min(window_samples, self.total_samples_received)
-        
-        if available < 100:
-            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
             
-        end_ptr = self.buffer_ptr
-        start_ptr = (end_ptr - available + self.max_plot_points) % self.max_plot_points
-        
-        # Extract data for trigger analysis
-        if start_ptr < end_ptr:
-            voltage_data = self.voltage_buffer[start_ptr:end_ptr]
-            time_data = self.time_buffer[start_ptr:end_ptr]
-        else:
-            voltage_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
-            time_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
-            
-        # Get triggered window
-        triggered_voltage, offset = self.trigger_system.get_triggered_window(voltage_data, window_periods=self.trigger_system.periods_to_display)
-        
-        if len(triggered_voltage) == 0:
-            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
-            
-        triggered_time = time_data[offset:offset+len(triggered_voltage)]
-        
-        # Center the display around the trigger point and scale appropriately
-        if self.trigger_system.detected_period is not None:
-            # Calculate optimal display window based on detected period
-            period_time = self.trigger_system.detected_period / self.sample_rate
-            display_periods = self.trigger_system.periods_to_display
-            optimal_window_time = display_periods * period_time
-            
-            # Find trigger points in the triggered data
-            triggers = self.trigger_system.find_triggers(triggered_voltage)
-            
-            if len(triggers) > 0:
-                # Use the first trigger as the starting point for clean period display
-                start_trigger_idx = triggers[0]
-                start_time = triggered_time[start_trigger_idx] if start_trigger_idx < len(triggered_time) else triggered_time[0]
-                
-                # Calculate window bounds starting from the first trigger
-                end_time = start_time + optimal_window_time
-                
-                # Find indices corresponding to this time window
-                time_mask = (triggered_time >= start_time) & (triggered_time <= end_time)
-                
-                if np.any(time_mask):
-                    final_voltage = triggered_voltage[time_mask]
-                    final_time = triggered_time[time_mask]
-                    
-                    # Normalize time to start from 0
-                    if len(final_time) > 0:
-                        final_time = final_time - final_time[0]
-                else:
-                    # Fallback if masking fails
-                    final_voltage = triggered_voltage
-                    final_time = triggered_time - triggered_time[0]
-            else:
-                # No triggers found, use original data
-                final_voltage = triggered_voltage
-                final_time = triggered_time - triggered_time[0]
-        else:
-            # No period detected, use original approach
-            final_voltage = triggered_voltage
-            final_time = triggered_time - triggered_time[0] if len(triggered_time) > 0 else triggered_time
-            
-        # Downsample if needed
-        if len(final_voltage) > self.MAX_POINTS_TO_PLOT:
-            stride = len(final_voltage) // self.MAX_POINTS_TO_PLOT
-            final_voltage = final_voltage[::stride]
-            final_time = final_time[::stride]
-            
-        return final_time, final_voltage
-        
-    def _update_trigger_display(self, x_data, y_data):
-        """Update trigger visualization on the plot"""
-        if len(y_data) == 0:
-            return
-            
-        # Update trigger level line
-        self.trigger_line.setPos(self.trigger_system.level)
-        
-        # Find and display trigger points
-        triggers = self.trigger_system.find_triggers(y_data)
-        
-        if len(triggers) > 0 and len(x_data) > max(triggers):
-            trigger_times = x_data[triggers]
-            trigger_voltages = y_data[triggers]
-            self.trigger_markers.setData(trigger_times, trigger_voltages)
-            
-            # Update status with period info
-            if self.trigger_system.detected_period is not None:
+            # Add period and frequency info to live stats if trigger is enabled
+            if self.trigger_enabled and self.trigger_system.detected_period is not None:
                 period_samples = self.trigger_system.detected_period
                 period_time = period_samples / self.sample_rate
                 frequency = 1.0 / period_time if period_time > 0 else 0
-                
-                # Debug logging for frequency calculation
-                if DEBUG_ENABLED:
-                    logger.debug(f"Frequency calc: period_samples={period_samples}, sample_rate={self.sample_rate}, period_time={period_time}, freq={frequency}")
                 
                 # Format frequency appropriately
                 if frequency >= 1000:
@@ -1548,10 +1621,145 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     freq_str = f"{frequency*1000:.1f}mHz"
                 
-                status_text = f"Status: {self.trigger_system.mode.title()} | Period: {period_time*1000:.1f}ms | Freq: {freq_str}"
-                self.trigger_status_label.setText(status_text)
+                self.stats_label.setText(
+                    f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V\n"
+                    f"Period: {period_time*1000:.1f}ms | Freq: {freq_str}")
+            else:
+                self.stats_label.setText(
+                    f"min: {ymin:.3f} V\nmax: {ymax:.3f} V\nRMS: {rms:.3f} V\nP2P: {p2p:.3f} V")
                 
-                # Update the trigger status color to indicate active triggering
+    def _get_triggered_window(self):
+        """Get triggered window of data for display - simplified with error handling"""
+        try:
+            # Get enough data for trigger analysis - not the entire time scale!
+            # We need enough data to find triggers and extract the requested periods
+            if self.trigger_system.detected_period is not None:
+                # Get about 3-5 periods worth of data for analysis (reduced from 10)
+                # This prevents requesting too much data for low frequencies
+                analysis_samples = int(5 * self.trigger_system.detected_period)
+                
+                # Special handling for different frequency ranges
+                if self.trigger_system.detected_period > self.sample_rate // 2:  # Period > 0.5 seconds (< 2Hz)
+                    # For very low frequencies, use a fixed analysis window
+                    analysis_samples = min(int(3 * self.sample_rate), self.total_samples_received)  # Max 3 seconds
+                elif self.trigger_system.detected_period > self.sample_rate // 10:  # Period > 0.1 seconds (< 10Hz)
+                    # For low frequencies (3-10Hz), ensure we get enough data
+                    analysis_samples = max(analysis_samples, int(1.5 * self.sample_rate))  # At least 1.5 seconds
+                    analysis_samples = min(analysis_samples, int(3 * self.sample_rate))  # Max 3 seconds
+                else:
+                    # For higher frequencies, cap at 2 seconds
+                    analysis_samples = min(analysis_samples, int(2 * self.sample_rate))
+            else:
+                # Fallback: get more data to help with period detection
+                analysis_samples = int(1.0 * self.sample_rate)  # Increased from 0.5 seconds
+                
+            # Ensure we don't request more than available
+            available = min(analysis_samples, self.total_samples_received)
+            
+            if available < 100:
+                return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+                
+            # Limit maximum analysis size to prevent memory issues
+            if available > 500000:  # > 5 seconds at 100kHz
+                print(f"Warning: Analysis window too large ({available} samples), limiting to 5 seconds")
+                available = 500000
+                
+            end_ptr = self.buffer_ptr
+            start_ptr = (end_ptr - available + self.max_plot_points) % self.max_plot_points
+            
+            # Extract data for trigger analysis
+            if start_ptr < end_ptr:
+                voltage_data = self.voltage_buffer[start_ptr:end_ptr]
+                time_data = self.time_buffer[start_ptr:end_ptr]
+            else:
+                voltage_data = np.concatenate((self.voltage_buffer[start_ptr:], self.voltage_buffer[:end_ptr]))
+                time_data = np.concatenate((self.time_buffer[start_ptr:], self.time_buffer[:end_ptr]))
+                
+            # Update auto level if needed (only once per frame)
+            if self.trigger_system.auto_level:
+                self.trigger_system.update_auto_level(voltage_data)
+                
+            # Get triggers - this is the ONLY call to find_triggers per frame
+            triggers = self.trigger_system.find_triggers(voltage_data)
+            
+            # Get triggered window using the simple method with the actual triggers
+            triggered_voltage, offset = self.trigger_system.get_triggered_window(voltage_data, triggers, self.trigger_system.periods_to_display)
+            
+            if len(triggered_voltage) == 0:
+                return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+                
+            # Create proper time axis for triggered display
+            if len(triggered_voltage) > 0:
+                # Create a time axis that shows the proper duration
+                if self.trigger_system.detected_period is not None:
+                    # Calculate the actual time duration we're showing
+                    period_time = self.trigger_system.detected_period / self.sample_rate
+                    total_time = self.trigger_system.periods_to_display * period_time
+                    final_time = np.linspace(0, total_time, len(triggered_voltage))
+                else:
+                    # Fallback: use sample-based time
+                    final_time = np.arange(len(triggered_voltage)) / self.sample_rate
+            else:
+                final_time = np.array([])
+                
+            # Downsample if needed
+            if len(triggered_voltage) > self.MAX_POINTS_TO_PLOT:
+                stride = len(triggered_voltage) // self.MAX_POINTS_TO_PLOT
+                triggered_voltage = triggered_voltage[::stride]
+                final_time = final_time[::stride]
+                
+            # Store triggers for display update (avoid re-computation)
+            self._last_triggers = triggers
+            self._last_trigger_data = voltage_data
+            self._last_time_data = time_data
+                
+            return final_time, triggered_voltage
+            
+        except Exception as e:
+            print(f"Error in triggered window: {e}")
+            # Return empty arrays on error to prevent crash
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
+        
+    def _update_trigger_display(self, x_data, y_data):
+        """Update trigger visualization on the plot - simplified"""
+        if len(y_data) == 0:
+            return
+            
+        # Update trigger level line
+        self.trigger_line.setPos(self.trigger_system.level)
+        
+        # Use stored triggers from _get_triggered_window to avoid re-computation
+        if hasattr(self, '_last_triggers') and len(self._last_triggers) > 0:
+            # Find actual trigger points in the displayed waveform
+            trigger_times = []
+            trigger_voltages = []
+            
+            # Since we start the window AT the first trigger, we know where it is
+            if len(x_data) > 0 and len(y_data) > 0:
+                # First trigger is at the start of our window (x=0)
+                trigger_times.append(0.0)
+                trigger_voltages.append(self.trigger_system.level)
+                
+                # If we have more triggers and know the period, show additional ones
+                if self.trigger_system.detected_period is not None and len(self._last_triggers) > 1:
+                    period_time = self.trigger_system.detected_period / self.sample_rate
+                    
+                    # Show up to 3 trigger points within our display window
+                    for i in range(1, min(4, int(self.trigger_system.periods_to_display) + 1)):
+                        trigger_time = i * period_time
+                        if trigger_time < x_data[-1]:  # Make sure it's within our window
+                            trigger_times.append(trigger_time)
+                            trigger_voltages.append(self.trigger_system.level)
+            
+            if len(trigger_times) > 0:
+                self.trigger_markers.setData(trigger_times, trigger_voltages)
+            else:
+                self.trigger_markers.setData([], [])
+                
+            # Update status with simplified trigger info (period/frequency now in live stats)
+            if self.trigger_system.detected_period is not None:
+                status_text = f"Status: {self.trigger_system.mode.title()} | Locked"
+                self.trigger_status_label.setText(status_text)
                 self.trigger_status_label.setStyleSheet("QLabel { background-color: #90EE90; padding: 5px; }")
             else:
                 self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Searching...")
@@ -1561,6 +1769,33 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.trigger_enabled:
                 self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | No triggers")
                 self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
+
+    def reset_trigger_system(self):
+        """Force reset trigger system - clear all state and restart detection"""
+        self.trigger_system.reset_trigger_system()
+        # Clear any stored trigger data
+        self._last_triggers = np.array([])
+        self._last_trigger_data = np.array([])
+        self._last_time_data = np.array([])
+        
+        if self.trigger_enabled:
+            # Temporarily disable and re-enable to force fresh start
+            self.trigger_enabled = False
+            self.trigger_enabled = True
+            self.trigger_status_label.setText(f"Status: {self.trigger_system.mode.title()} | Reset - Searching...")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFE4B5; padding: 5px; }")
+        else:
+            self.trigger_status_label.setText("Status: Disabled")
+            self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
+        self.trigger_markers.setData([], [])
+        print("Trigger system force reset - all state cleared")
+
+    def on_dma_error_occurred(self):
+        """Handle DMA error notification"""
+        self.trigger_system.reset_trigger_system()
+        self.trigger_status_label.setText("Status: DMA Error")
+        self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
+        self.trigger_markers.setData([], [])
 
 def main():
     """Main function to run the application."""
