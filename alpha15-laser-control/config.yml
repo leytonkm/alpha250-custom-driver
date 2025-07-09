@@ -28,7 +28,7 @@ cores:
 memory:
   # Control registers (FIXED: moved from 0x40000000 to avoid DMA conflict)
   - name: control
-    offset: '0x40000000'
+    offset: '0x60000000'
     range: 4K
   
   # Status registers  
@@ -47,22 +47,16 @@ memory:
     range: 64K
   # DMA memory regions (MM2S path reserved for completeness, not currently used by hardware)
   - name: ram_mm2s
-    offset: '0x1C000000'
+    offset: '0x1E000000'
     range: 16M
 
   # DMA memory regions (following adc-dac-dma example exactly)
   - name: ram_s2mm
-    offset: '0x1D000000'
+    offset: '0x1F000000'
     range: 16M
   - name: dma
-    offset: '0x40400000'
+    offset: '0x70000000'
     range: 64K
-  - name: axi_hp0
-    offset: '0xF8008000'
-    range: 4K
-  - name: axi_hp2
-    offset: '0xF800A000'
-    range: 4K
   - name: ocm_mm2s
     offset: '0xFFFF0000'
     range: 32K
@@ -114,15 +108,15 @@ ps_status_registers:
 
 parameters:
   # Clock configuration
-  fclk0: 143000000      # FPGA fabric clock (143 MHz for DMA)
-  adc_clk: 15000000     # ADC sampling clock (15 MHz for Alpha15 - CORRECTED from 240MHz)
-  adp5071_clk: 2400000    # DC-DC converter sync clock (2.4 MHz)
-  dac_clk: 250000000    # DAC update clock (250 MHz)
-  
-  # System parameters
-  dac_width: 16         # DAC width (16 bits)
-  adc_width: 18         # ADC width (18 bits)
-  n_adc: 2              # Number of ADC channels
+
+  fclk0: 143000000
+  adc_clk: 240000000
+  adp5071_clk: 2400000
+  dac_width: 16
+  adc_width: 18
+  n_adc: 2
+
+          # Number of ADC channels
   
   # Hardware ramp parameters
   ramp_phase_width: 32  # Phase accumulator width for ramp timing

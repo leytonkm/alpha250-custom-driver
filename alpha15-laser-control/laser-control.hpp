@@ -60,8 +60,6 @@ class CurrentRamp
     , sts(ctx.mm.get<mem::status>())
     , dma(ctx.mm.get<mem::dma>())
     , ram_s2mm(ctx.mm.get<mem::ram_s2mm>())
-    , axi_hp0(ctx.mm.get<mem::axi_hp0>())
-    , axi_hp2(ctx.mm.get<mem::axi_hp2>())
     , ocm_s2mm(ctx.mm.get<mem::ocm_s2mm>())
     , ocm_mm2s(ctx.mm.get<mem::ocm_mm2s>())
     , sclr(ctx.mm.get<mem::sclr>())
@@ -777,8 +775,6 @@ class CurrentRamp
     // DMA memory interfaces
     Memory<mem::dma>& dma;
     Memory<mem::ram_s2mm>& ram_s2mm;
-    Memory<mem::axi_hp0>& axi_hp0;
-    Memory<mem::axi_hp2>& axi_hp2;
     Memory<mem::ocm_s2mm>& ocm_s2mm;
     Memory<mem::ocm_mm2s>& ocm_mm2s;
     Memory<mem::sclr>& sclr;
@@ -806,12 +802,6 @@ class CurrentRamp
         // Unlock SCLR (following adc-dac-dma example)
         sclr.write<Sclr_regs::sclr_unlock>(0xDF0D);
         sclr.clear_bit<Sclr_regs::fpga_rst_ctrl, 1>();
-
-        // Make sure that the width of the AXI HP port is 64 bit
-        axi_hp0.clear_bit<0x0, 0>();
-        axi_hp0.clear_bit<0x14, 0>();
-        axi_hp2.clear_bit<0x0, 0>();
-        axi_hp2.clear_bit<0x14, 0>();
 
         // Map the last 64 kB of OCM RAM to the high address space
         sclr.write<Sclr_regs::ocm_cfg>(0b1000);
