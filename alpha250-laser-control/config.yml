@@ -1,0 +1,158 @@
+---
+name: laser-control
+board: boards/alpha250
+version: 2.0.0
+
+cores:
+  # Basic register control
+  - fpga/cores/axi_ctl_register_v1_0
+  - fpga/cores/axi_sts_register_v1_0
+  - fpga/cores/edge_detector_v1_0
+  - fpga/cores/comparator_v1_0
+  - fpga/cores/unrandomizer_v1_0
+  # DDS core for precise timing generation
+  - fpga/cores/axis_variable_v1_0
+  # Hardware ramp generation cores
+  - fpga/cores/latched_mux_v1_0
+  # DMA streaming cores
+  - fpga/cores/tlast_gen_v1_0
+  - fpga/cores/bus_multiplexer_v1_0
+  # Precision DAC core for Alpha250
+  - boards/alpha250/cores/precision_dac_v1_0
+  - boards/alpha250/cores/spi_cfg_v1_0
+  - ./address_counter_v1_0
+
+memory:
+  # Control registers
+  - name: control
+    offset: '0x40000000'
+    range: 4K
+  
+  # Status registers  
+  - name: status
+    offset: '0x50000000'
+    range: 4K
+  - name: ps_control
+    offset: '0x54000000'
+    range: 4K
+  - name: ps_status
+    offset: '0x58000000'
+    range: 4K
+  - name: xadc
+    offset: '0x43C00000'
+    range: 64K
+
+  # DMA memory regions (following adc-dac-dma example exactly)
+  - name: ram_s2mm
+    offset: '0x1F000000'
+    range: 16M
+  - name: dma
+    offset: '0x40400000'
+    range: 64K
+  - name: axi_hp0
+    offset: '0xF8008000'
+    range: 4K
+  - name: axi_hp2
+    offset: '0xF800A000'
+    range: 4K
+  - name: ocm_mm2s
+    offset: '0xFFFF0000'
+    range: 32K
+  - name: ocm_s2mm
+    offset: '0xFFFF8000'
+    range: 32K
+  - name: sclr
+    offset: '0xF8000000'
+    range: 64K
+
+control_registers:
+  # MMCM control
+  - mmcm
+  # Precision DAC control registers
+  - precision_dac_ctl
+  - precision_dac_data[2]
+  # Hardware ramp generation
+  - ramp_freq_incr        # Phase increment for ramp frequency
+  - ramp_amplitude_reg    # Amplitude control in hardware
+  - ramp_offset_reg       # Offset control in hardware
+  - ramp_enable           # Hardware ramp enable/disable
+  - ramp_reset            # Reset ramp phase accumulator
+  - trig
+  # DMA streaming control
+  - channel_select        # ADC channel selection for streaming
+  - decimation_rate       # CIC decimation rate control
+
+status_registers:
+  # Real-time data
+  - adc[n_adc]          # Raw ADC values for debugging
+  - system_status       # Error flags, overflows, etc.
+  - ramp_phase          # Current ramp phase for monitoring
+  - cycle_count         # Number of completed ramp cycles
+  # Simple ADC monitoring
+  - adc_channel_data    # Selected ADC channel data
+  - decimated_rate      # Decimated sample rate
+
+ps_control_registers:
+  - spi_cfg_data
+  - spi_cfg_cmd
+
+ps_status_registers:
+  - spi_cfg_sts
+
+parameters:
+  # Clock configuration
+  fclk0: 143000000      # FPGA fabric clock (143 MHz for DMA)
+  adc_clk: 250000000    # ADC sampling clock (250 MHz) 
+  dac_clk: 250000000    # DAC update clock (250 MHz)
+  
+  # System parameters
+  dac_width: 16         # DAC width (16 bits)
+  adc_width: 16         # ADC width (16 bits)
+  n_adc: 2              # Number of ADC channels
+  
+  # Hardware ramp parameters
+  ramp_phase_width: 32  # Phase accumulator width for ramp timing
+  samples_per_cycle: 1000    # Default samples per 10Hz cycle
+  base_frequency: 10    # Base ramp frequency (Hz)
+  
+  # CIC Decimation parameters for ADC streaming
+  cic_differential_delay: 1         # CIC differential delay
+  cic_decimation_rate_default: 2500 # Default rate: 250MHz → 100kHz  
+  cic_decimation_rate_min: 10       # Min rate: 250MHz → 25MHz
+  cic_decimation_rate_max: 8192     # Max rate: 250MHz → 30.5kHz (limited by CIC IP)
+  cic_n_stages: 6                   # Number of CIC stages
+  
+  # Voltage ranges (for web interface)
+  max_ramp_voltage: 2.5      # Maximum ramp amplitude (V)
+  max_dc_voltage: 2.5       # Maximum DC output (V)
+  adc_voltage_range: 1.8     # ADC input range (±V)
+  ramp_offset : 1.5
+  ramp_amplitude : 1.0
+
+xdc:
+  - boards/alpha250/config/ports.xdc
+  - ./expansion_connector.xdc
+
+drivers:
+  # Required Alpha250 drivers (must be in correct order)
+  - boards/alpha250/drivers/common.hpp
+  - boards/alpha250/drivers/eeprom.hpp
+  - boards/alpha250/drivers/gpio-expander.hpp
+  - boards/alpha250/drivers/temperature-sensor.hpp
+  - boards/alpha250/drivers/power-monitor.hpp
+  - boards/alpha250/drivers/clock-generator.hpp
+  - boards/alpha250/drivers/ltc2157.hpp
+  - boards/alpha250/drivers/ad9747.hpp
+  - boards/alpha250/drivers/precision-adc.hpp
+  - boards/alpha250/drivers/precision-dac.hpp
+  - boards/alpha250/drivers/spi-config.hpp
+  # Application drivers
+  - ./laser-control.hpp
+
+web:
+  - web/koheron.ts
+  - web/main.css
+  - ./web/index.html
+  - ./web/voltage-control.html
+  - ./web/voltage-control.ts
+  - ./web/app.ts
