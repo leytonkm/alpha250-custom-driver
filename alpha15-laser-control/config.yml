@@ -1,7 +1,7 @@
 ---
-name: laser-control
-board: boards/alpha250
-version: 2.0.0
+name: alpha15-laser-control
+board: boards/alpha15
+version: 0.1.0
 
 cores:
   # Basic register control
@@ -20,10 +20,13 @@ cores:
   # Precision DAC core for Alpha250
   - boards/alpha250/cores/precision_dac_v1_0
   - boards/alpha250/cores/spi_cfg_v1_0
+  - boards/alpha15/cores/dcdc_sync_v1_0
+  - boards/alpha15/cores/mmcm_phase_shifter_v1_0
+  - boards/alpha15/cores/ltc2387_v1_0
   - ./address_counter_v1_0
 
 memory:
-  # Control registers
+  # Control registers (FIXED: moved from 0x40000000 to avoid DMA conflict)
   - name: control
     offset: '0x40000000'
     range: 4K
@@ -32,6 +35,7 @@ memory:
   - name: status
     offset: '0x50000000'
     range: 4K
+  # PS control registers (FIXED: moved from 0x54000000 to avoid status conflict)
   - name: ps_control
     offset: '0x54000000'
     range: 4K
@@ -41,10 +45,14 @@ memory:
   - name: xadc
     offset: '0x43C00000'
     range: 64K
+  # DMA memory regions (MM2S path reserved for completeness, not currently used by hardware)
+  - name: ram_mm2s
+    offset: '0x1C000000'
+    range: 16M
 
   # DMA memory regions (following adc-dac-dma example exactly)
   - name: ram_s2mm
-    offset: '0x1F000000'
+    offset: '0x1D000000'
     range: 16M
   - name: dma
     offset: '0x40400000'
@@ -68,7 +76,7 @@ memory:
 control_registers:
   # MMCM control
   - mmcm
-  # Precision DAC control registers
+  # Precision DAC and ADC control registers
   - precision_dac_ctl
   - precision_dac_data[2]
   # Hardware ramp generation
@@ -78,6 +86,10 @@ control_registers:
   - ramp_enable           # Hardware ramp enable/disable
   - ramp_reset            # Reset ramp phase accumulator
   - trig
+  # ADC range control (ltc2387 driver expects rf_adc_ctl[2])
+  - rf_adc_ctl[2]
+  # Power DC-DC sync control (optional, kept for completeness)
+  - adp5071_sync
   # DMA streaming control
   - channel_select        # ADC channel selection for streaming
   - decimation_rate       # CIC decimation rate control
@@ -91,6 +103,7 @@ status_registers:
   # Simple ADC monitoring
   - adc_channel_data    # Selected ADC channel data
   - decimated_rate      # Decimated sample rate
+  - mmcm_sts            # Clock generator MMCM status
 
 ps_control_registers:
   - spi_cfg_data
@@ -102,12 +115,13 @@ ps_status_registers:
 parameters:
   # Clock configuration
   fclk0: 143000000      # FPGA fabric clock (143 MHz for DMA)
-  adc_clk: 250000000    # ADC sampling clock (250 MHz) 
+  adc_clk: 15000000     # ADC sampling clock (15 MHz for Alpha15 - CORRECTED from 240MHz)
+  adp5071_clk: 2400000    # DC-DC converter sync clock (2.4 MHz)
   dac_clk: 250000000    # DAC update clock (250 MHz)
   
   # System parameters
   dac_width: 16         # DAC width (16 bits)
-  adc_width: 16         # ADC width (16 bits)
+  adc_width: 18         # ADC width (18 bits)
   n_adc: 2              # Number of ADC channels
   
   # Hardware ramp parameters
@@ -117,9 +131,9 @@ parameters:
   
   # CIC Decimation parameters for ADC streaming
   cic_differential_delay: 1         # CIC differential delay
-  cic_decimation_rate_default: 2500 # Default rate: 250MHz → 100kHz  
-  cic_decimation_rate_min: 10       # Min rate: 250MHz → 25MHz
-  cic_decimation_rate_max: 8192     # Max rate: 250MHz → 30.5kHz (limited by CIC IP)
+  cic_decimation_rate_default: 100 # Default: 15MHz → 150kHz  
+  cic_decimation_rate_min: 10       # Min rate: 15MHz → 1.5MHz
+  cic_decimation_rate_max: 8192     # Max rate: 15MHz → 1.8kHz (limited by CIC IP)
   cic_n_stages: 6                   # Number of CIC stages
   
   # Voltage ranges (for web interface)
@@ -130,20 +144,19 @@ parameters:
   ramp_amplitude : 1.0
 
 xdc:
-  - boards/alpha250/config/ports.xdc
+  - boards/alpha15/config/ports.xdc
   - ./expansion_connector.xdc
 
 drivers:
-  # Required Alpha250 drivers (must be in correct order)
-  - boards/alpha250/drivers/common.hpp
-  - boards/alpha250/drivers/eeprom.hpp
+  # Alpha15 driver stack following reference example order
+  - boards/alpha15/drivers/common.hpp
+  - boards/alpha15/drivers/eeprom.hpp
+  - boards/alpha15/drivers/clock-generator.hpp
+  - boards/alpha15/drivers/ltc2387.hpp
   - boards/alpha250/drivers/gpio-expander.hpp
   - boards/alpha250/drivers/temperature-sensor.hpp
   - boards/alpha250/drivers/power-monitor.hpp
-  - boards/alpha250/drivers/clock-generator.hpp
-  - boards/alpha250/drivers/ltc2157.hpp
-  - boards/alpha250/drivers/ad9747.hpp
-  - boards/alpha250/drivers/precision-adc.hpp
+  - boards/alpha250/drivers/ad9747.hpp       # DAC unchanged
   - boards/alpha250/drivers/precision-dac.hpp
   - boards/alpha250/drivers/spi-config.hpp
   # Application drivers

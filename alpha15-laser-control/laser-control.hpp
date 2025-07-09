@@ -11,8 +11,8 @@
 #include <cstdint>
 #include <context.hpp>
 #include <boards/alpha250/drivers/precision-dac.hpp>
-#include <boards/alpha250/drivers/clock-generator.hpp>
-#include <boards/alpha250/drivers/ltc2157.hpp>
+#include <boards/alpha15/drivers/clock-generator.hpp>
+#include <boards/alpha15/drivers/ltc2387.hpp>
 #include <array>
 #include <cmath>
 #include <vector>
@@ -55,7 +55,7 @@ class CurrentRamp
     : ctx(ctx_)
     , precision_dac(ctx.get<PrecisionDac>())
     , clk_gen(ctx.get<ClockGenerator>())
-    , ltc2157(ctx.get<Ltc2157>())
+    , ltc2387(ctx.get<Ltc2387>())
     , ctl(ctx.mm.get<mem::control>())
     , sts(ctx.mm.get<mem::status>())
     , dma(ctx.mm.get<mem::dma>())
@@ -72,10 +72,10 @@ class CurrentRamp
     , ramp_frequency(10.0)
     , hardware_ramp_enabled(false)
     , streaming_active(false)
-    , decimation_rate(2500)
+    , decimation_rate(100)
     {
-        // Get ADC sampling frequency for phase increment calculation
-        fs_adc = clk_gen.get_adc_sampling_freq();
+        // Alpha15 clock generator returns std::array<double,2>
+        fs_adc = clk_gen.get_adc_sampling_freq()[0];
         
         // Initialize hardware ramp disabled
         ctl.write<reg::ramp_enable>(0);
@@ -83,8 +83,8 @@ class CurrentRamp
         // Initialize DMA system (following adc-dac-dma example)
         init_dma_system();
         
-        // Initialize CIC decimation rate to default (250MHz → 100kHz)
-        set_decimation_rate(2500);
+        // Initialize CIC decimation rate to default (240MHz → 2.4MHz)
+        set_decimation_rate(100);
         
         ctx.log<INFO>("CurrentRamp: Hardware ramp generator initialized, fs_adc = %.1f MHz", fs_adc / 1e6);
         ctx.log<INFO>("CurrentRamp: DMA streaming system initialized");
@@ -519,8 +519,17 @@ class CurrentRamp
                                     : (word32 >> 16);
 
             int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
-            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+            // Use calibrated voltage conversion (same as adc_to_voltage)
+            // Convert 16-bit CIC output back to 18-bit equivalent for calibration
+            int32_t adc_18bit = static_cast<int32_t>(adc_signed) << 2; // Scale up to 18-bit range
+            
+            // Get calibration parameters for current range
+            uint32_t range = adc_range_sel_;
+            float gain = ltc2387.get_gain(0, range);     // LSB/V
+            float adc_offset = ltc2387.get_offset(0, range); // LSB
+            
+            // Apply calibration: voltage = (raw_value - offset) / gain
+            float voltage = (static_cast<float>(adc_18bit) - adc_offset) / gain;
             result.push_back(voltage);
         }
 
@@ -548,7 +557,12 @@ class CurrentRamp
 
         std::vector<float> result(size);
         uint32_t buf_idx = offset;
-        const float scale = 0.5f / 13107.2f; // pre-compute for speed
+        // Pre-compute calibration factors for speed (same as adc_to_voltage)
+        uint32_t range = adc_range_sel_;
+        const float gain = ltc2387.get_gain(0, range);     // LSB/V
+        const float adc_offset = ltc2387.get_offset(0, range); // LSB
+        const float scale_factor = 4.0f / gain; // *4 to convert 16-bit CIC to 18-bit equivalent
+        const float offset_factor = adc_offset / gain;
 
         uint32_t samples_remaining = size;
         while (samples_remaining > 0) {
@@ -565,10 +579,10 @@ class CurrentRamp
             bool even_alignment = (sample_byte_offset % 4) == 0;
             if (even_alignment) {
                 // s0 first, then possibly s1
-                result[size - samples_remaining] = static_cast<float>(s0) * scale;
+                result[size - samples_remaining] = static_cast<float>(s0) * scale_factor - offset_factor;
                 samples_remaining--;
                 if (samples_remaining > 0) {
-                    result[size - samples_remaining] = static_cast<float>(s1) * scale;
+                    result[size - samples_remaining] = static_cast<float>(s1) * scale_factor - offset_factor;
                     samples_remaining--;
                     buf_idx = (buf_idx + 2) % total_buffer_samples;
                 } else {
@@ -576,7 +590,7 @@ class CurrentRamp
                 }
             } else {
                 // odd alignment: s1 is the first valid sample in this word
-                result[size - samples_remaining] = static_cast<float>(s1) * scale;
+                result[size - samples_remaining] = static_cast<float>(s1) * scale_factor - offset_factor;
                 samples_remaining--;
                 buf_idx = (buf_idx + 1) % total_buffer_samples;
             }
@@ -652,12 +666,30 @@ class CurrentRamp
     }
     
     float adc_to_voltage(uint32_t adc_raw) {
-        // ADC delivers 14-bit two's-complement data, sign-extended to 16 bits by FPGA
-        // Range: −8192 … +8191  →  −0.5 V … +0.5 V (1 Vpp)
-        int16_t adc_signed = static_cast<int16_t>(adc_raw & 0xFFFF);
-        // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
-        float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
-        return voltage;
+        // Use calibrated voltage conversion from LTC2387 driver
+        // This applies proper gain and offset corrections from EEPROM
+        int32_t adc_signed = static_cast<int32_t>(adc_raw);
+        adc_signed <<= 14; // align sign to 32-bit
+        adc_signed >>= 14; // restore sign but keep 18-bit value
+        
+        // Get calibration parameters for current range
+        uint32_t range = adc_range_sel_;
+        float gain = ltc2387.get_gain(0, range);     // LSB/V
+        float offset = ltc2387.get_offset(0, range); // LSB
+        
+        // Apply calibration: voltage = (raw_value - offset) / gain
+        return (static_cast<float>(adc_signed) - offset) / gain;
+    }
+
+    // === ADC RANGE CONTROL ===
+    // range: 0 → 2 Vpp (default), 1 → 8 Vpp
+    void set_adc_input_range(uint8_t range_sel) {
+        adc_range_sel_ = (range_sel ? 1 : 0);
+        // Use LTC2387 driver helper to set range per channel (0: 2 Vpp, 1: 8 Vpp)
+        ltc2387.range_select(0, adc_range_sel_);
+        ltc2387.range_select(1, adc_range_sel_);
+        adc_range_vpp_ = adc_range_sel_ ? 8.0f : 2.0f;
+        ctx.log<INFO>("ADC input range set to %.1f Vpp", static_cast<double>(adc_range_vpp_));
     }
     
     float get_adc0_voltage() {
@@ -716,8 +748,17 @@ class CurrentRamp
                                     : (word32 >> 16);
 
             int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Empirically corrected scaling that matches CIC gain compensation (see read_adc_buffer_chunk)
-            float voltage = (static_cast<float>(adc_signed) / 13107.2f) * 0.5f;
+            // Use calibrated voltage conversion (same as adc_to_voltage)
+            // Convert 16-bit CIC output back to 18-bit equivalent for calibration
+            int32_t adc_18bit = static_cast<int32_t>(adc_signed) << 2; // Scale up to 18-bit range
+            
+            // Get calibration parameters for current range
+            uint32_t range = adc_range_sel_;
+            float gain = ltc2387.get_gain(0, range);     // LSB/V
+            float adc_offset = ltc2387.get_offset(0, range); // LSB
+            
+            // Apply calibration: voltage = (raw_value - offset) / gain
+            float voltage = (static_cast<float>(adc_18bit) - adc_offset) / gain;
             result[i] = voltage;
         }
 
@@ -729,7 +770,7 @@ class CurrentRamp
     Context& ctx;
     PrecisionDac& precision_dac;
     ClockGenerator& clk_gen;
-    Ltc2157& ltc2157;
+    Ltc2387& ltc2387;
     Memory<mem::control>& ctl;
     Memory<mem::status>& sts;
     
@@ -743,7 +784,9 @@ class CurrentRamp
     Memory<mem::sclr>& sclr;
     
     // Clock and timing
-    double fs_adc;  // ADC sampling frequency
+    double fs_adc;  // ADC sampling frequency (Hz)
+    uint8_t adc_range_sel_ = 0; // 0=2Vpp,1=8Vpp
+    float   adc_range_vpp_ = 2.0f;
     
     // DC control state
     float dc_voltage;

@@ -25,8 +25,8 @@ logger = logging.getLogger('LaserControl')
 
 # --- Constants ---
 APP_TITLE = "Laser Control - Live ADC Scope"
-DEFAULT_HOST = os.environ.get('HOST', '192.168.1.20')
-INSTRUMENT_NAME = 'laser-control'
+DEFAULT_HOST = os.environ.get('HOST', '192.168.1.115')
+INSTRUMENT_NAME = 'alpha15-laser-control'
 
 # Performance settings (values will be refined after connecting to instrument)
 UPDATE_INTERVAL_MS = 50  # Target plot refresh period (ms)
@@ -43,11 +43,11 @@ SAFETY_FACTOR = 1.03  # 3 % head-room
 
 def compute_decimation(run_seconds: float) -> int:
     """Return a CIC decimation rate that keeps visible samples ≤ MAX_VISIBLE_SAMPLES."""
-    FS_ADC = 250_000_000  # 250 MHz, defined in config.yml
+    FS_ADC = 15_000_000  # 15 MHz for Alpha15 board (CORRECTED from 240 MHz)
     target_rate = FS_ADC * run_seconds / MAX_VISIBLE_SAMPLES
     dec_rate = math.ceil(target_rate)
-    if dec_rate < 2500:
-        dec_rate = 2500  # 100 kS/s upper limit
+    if dec_rate < 100:
+        dec_rate = 100  # 75-150 kS/s practical upper limit
     return min(dec_rate, 8192)
 
 # --- Driver Interface ---
@@ -97,6 +97,15 @@ class CurrentRamp:
 
     @command('CurrentRamp')
     def set_decimation_rate(self, rate):
+        pass
+
+    # New: switch ADC input range (0 = 2 Vpp, 1 = 8 Vpp)
+    @command('CurrentRamp')
+    def set_adc_input_range(self, range_sel):
+        pass
+
+    @command('CurrentRamp')
+    def select_adc_channel(self, channel):
         pass
 
 # --- Triggering System ---
@@ -828,6 +837,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_worker = None
         self.live_worker = None
 
+        # --- Initial ADC Setup ---
+        # Select ADC channel 0 (RFADC0) and set range
+        self.driver.select_adc_channel(0)
+        self.driver.set_adc_input_range(0)  # 2 Vpp range (more sensitive)
+        
         # --- Data Buffers ---
         self.time_scale_s = 5.0 # Default time window to display
         self.sample_rate = self.driver.get_decimated_sample_rate()
@@ -1108,6 +1122,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Status Bar ---
         self.status_bar = self.statusBar()
 
+        # --- ADC Range selection ---
+        range_group_box = QtWidgets.QGroupBox("ADC Range")
+        range_layout = QtWidgets.QVBoxLayout()
+        self.range_combo = QtWidgets.QComboBox()
+        self.range_combo.addItems(["2 Vpp", "8 Vpp"])
+        range_layout.addWidget(self.range_combo)
+        range_group_box.setLayout(range_layout)
+
+        control_layout.addWidget(range_group_box)
+
     def connect_signals(self):
         """Connect UI signals to slots."""
         self.start_button.toggled.connect(self.toggle_streaming)
@@ -1131,6 +1155,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_level_button.clicked.connect(self.on_auto_level_clicked)
         self.periods_spinbox.valueChanged.connect(self.on_periods_changed)
         self.reset_trigger_button.clicked.connect(self.reset_trigger_system)
+        self.range_combo.currentIndexChanged.connect(self.on_adc_range_changed)
 
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
@@ -1341,7 +1366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Clamp to allowed range
         if desired_rate <= 0:
             desired_rate = 100000
-        dec_rate = math.ceil(250_000_000 / desired_rate)
+        dec_rate = math.ceil(240_000_000 / desired_rate)
         dec_rate = max(10, min(8192, dec_rate))
 
         # Check that requested duration fits in max points
@@ -1795,11 +1820,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
         self.trigger_markers.setData([], [])
 
+    def on_adc_range_changed(self, idx):
+        """Handle ADC input range change (0 = 2 Vpp, 1 = 8 Vpp)"""
+        try:
+            self.driver.set_adc_input_range(int(idx))
+            self.status_bar.showMessage(f"ADC range set to {'2' if idx==0 else '8'} Vpp")
+        except Exception as e:
+            self.status_bar.showMessage(f"Failed to set ADC range: {e}")
+
 def main():
     """Main function to run the application."""
     logger.info("Attempting to connect to instrument...")
     try:
-        client = connect(DEFAULT_HOST, 'laser-control')
+        client = connect(DEFAULT_HOST, 'alpha15-laser-control')
         driver = CurrentRamp(client)
         logger.info("✅ Connected to %s at %s", INSTRUMENT_NAME, DEFAULT_HOST)
     except Exception as e:

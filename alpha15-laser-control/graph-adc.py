@@ -51,8 +51,8 @@ class CurrentRamp:
 def connect_to_device():
     """Connect to Alpha250"""
     try:
-        host = os.environ.get('HOST', '192.168.1.20')
-        client = connect(host, 'currentramp', restart=False)
+        host = os.environ.get('HOST', '192.168.1.115')
+        client = connect(host, 'alpha15-laser-control', restart=False)
         driver = CurrentRamp(client)
         print(f"✅ Connected to {host}")
         return driver
@@ -121,7 +121,10 @@ class LivePlot:
     def setup_adc_rate(self, sample_rate_khz):
         """Configure CIC decimation rate on the device."""
         decimation_rates = {
-            30.5: 8192, 50: 5000, 100: 2500, 200: 1250,
+            30: 500,    # 15MHz /500 = 30kHz
+            50: 300,    # 15MHz /300 = 50kHz
+            75: 200,    # 15MHz /200 = 75kHz
+            100: 150,   # 15MHz /150 = 100kHz
         }
         if sample_rate_khz not in decimation_rates:
             print(f"⚠️  Unsupported sample rate {sample_rate_khz}kHz, using 100kHz")
@@ -210,7 +213,7 @@ def main():
         return 1
     
     # === CUSTOMIZE THESE PARAMETERS ===
-    sample_rate_khz = 100      # Sample rate: 30.5, 50, 100, or 200 kHz
+    sample_rate_khz = 75       # Sample rate options: 30, 50, 75, 100 kHz
     initial_duration_s = 1.0   # Initial time window in seconds
     
     print(f"📊 Target sample rate: {sample_rate_khz} kHz")
