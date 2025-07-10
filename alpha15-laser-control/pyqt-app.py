@@ -43,11 +43,11 @@ SAFETY_FACTOR = 1.03  # 3 % head-room
 
 def compute_decimation(run_seconds: float) -> int:
     """Return a CIC decimation rate that keeps visible samples ≤ MAX_VISIBLE_SAMPLES."""
-    FS_ADC = 15_000_000  # 15 MHz for Alpha15 board (CORRECTED from 240 MHz)
+    FS_ADC = 15_000_000  # 15 MHz for Alpha15 board (CORRECTED from earlier incorrect 240 MHz)
     target_rate = FS_ADC * run_seconds / MAX_VISIBLE_SAMPLES
     dec_rate = math.ceil(target_rate)
-    if dec_rate < 100:
-        dec_rate = 100  # 75-150 kS/s practical upper limit
+    if dec_rate < 10:
+        dec_rate = 10  # Minimum decimation rate from config
     return min(dec_rate, 8192)
 
 # --- Driver Interface ---

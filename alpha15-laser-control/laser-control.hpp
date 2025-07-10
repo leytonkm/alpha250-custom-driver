@@ -44,8 +44,8 @@ namespace Sclr_regs {
 }
 
 // DMA streaming parameters
-#define LASER_CONTROL_N_PTS 2048
-constexpr uint32_t n_pts = LASER_CONTROL_N_PTS;      // Number of 16-bit samples per descriptor (≈20 ms @ 100 kS/s)
+#define LASER_CONTROL_N_PTS 1024
+constexpr uint32_t n_pts = LASER_CONTROL_N_PTS;      // Number of 32-bit samples per descriptor (≈20 ms @ 50 kS/s)
 constexpr uint32_t n_desc = 512; // Number of descriptors (32 KiB descriptor list)
 
 class CurrentRamp
@@ -302,19 +302,22 @@ class CurrentRamp
     }
     
     void set_decimation_rate(uint32_t rate) {
-        // Validate decimation rate
         if (rate < 10 || rate > 8192) {
             ctx.log<ERROR>("Invalid decimation rate: %u (must be 10-8192)", rate);
             return;
         }
         
         decimation_rate = rate;
-        ctl.write<reg::decimation_rate>(rate);
         
-        // Calculate actual output sample rate
-        double decimated_fs = fs_adc / rate;
-        ctx.log<INFO>("CIC decimation rate set to %u (%.0f MHz → %.0f kHz)", 
-                      rate, fs_adc/1e6, decimated_fs/1e3);
+        // Sample rate calculation: fs_adc / (CIC_rate × FIR_rate)
+        // FIR has fixed decimation rate of 2, CIC has programmable rate
+        double fs_decimated = fs_adc / (2.0 * static_cast<double>(rate));
+        
+        ctx.log<INFO>("CIC decimation rate set to: %u", rate);
+        ctx.log<INFO>("Effective sample rate: %.1f kS/s", fs_decimated / 1000.0);
+        
+        // Write to CIC rate control register
+        ctl.write<reg::decimation_rate>(rate);
     }
     
     uint32_t get_decimation_rate() {
@@ -322,7 +325,8 @@ class CurrentRamp
     }
     
     double get_decimated_sample_rate() {
-        return fs_adc / decimation_rate;
+        // Account for both CIC and FIR (factor of 2) decimation
+        return fs_adc / (2.0 * static_cast<double>(decimation_rate));
     }
     
     void start_streaming() {
@@ -497,7 +501,8 @@ class CurrentRamp
         return !get_dma_error() && streaming_active;
     }
 
-    std::vector<float> read_adc_buffer_chunk(uint32_t offset, uint32_t size) {
+    std::vector<float> read_adc_buffer_chunk(uint32_t offset, uint32_t size) 
+    {
         if (!streaming_active) {
             return {};
         }
@@ -514,37 +519,22 @@ class CurrentRamp
         for (uint32_t i = 0; i < size; ++i) {
             uint32_t buffer_idx = (offset + i) % total_buffer_samples;
 
-            uint32_t sample_byte_offset = buffer_idx * 2;
-            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
-            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
+            // Read 32-bit CIC+FIR output directly
+            uint32_t sample_byte_offset = buffer_idx * 4;
+            int32_t adc_raw = static_cast<int32_t>(ram_s2mm.read_reg(sample_byte_offset));
 
-            uint16_t raw_data = (sample_byte_offset % 4 == 0)
-                                    ? (word32 & 0xFFFF)
-                                    : (word32 >> 16);
-
-            int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use calibrated voltage conversion (same as adc_to_voltage)
-            // Convert 16-bit CIC output back to 18-bit equivalent for calibration
-            int32_t adc_18bit = static_cast<int32_t>(adc_signed) << 2; // Scale up to 18-bit range
-            
-            // Get calibration parameters for current range
-            uint32_t range = adc_range_sel_;
-            float gain = ltc2387.get_gain(0, range);     // LSB/V
-            float adc_offset = ltc2387.get_offset(0, range); // LSB
-            
-            // Apply calibration: voltage = (raw_value - offset) / gain
-            float voltage = (static_cast<float>(adc_18bit) - adc_offset) / gain;
-            result.push_back(voltage);
+            // Apply corrected voltage scaling
+            result.push_back(adc_to_voltage(static_cast<uint32_t>(adc_raw)));
         }
 
         return result;
     }
 
     // === NEW FAST CHUNK READER ===
-    // Reads a block of samples much faster than read_adc_buffer_chunk by bursting
-    // 32-bit words and decoding two 16-bit ADC samples per AXI read. This reduces
-    // the number of MMIO transactions by ~2× and lets Python request >50 kS per call.
-    // offset and size are expressed in 16-bit samples (same as old function).
+    // Reads a block of samples much faster than read_adc_buffer_chunk by reading
+    // 32-bit CIC+FIR samples directly. This reduces complexity and correctly handles
+    // the 32-bit output format.
+    // offset and size are expressed in 32-bit samples.
     std::vector<float> read_adc_buffer_block(uint32_t offset, uint32_t size) {
         if (!streaming_active || size == 0) {
             return {};
@@ -560,45 +550,17 @@ class CurrentRamp
         }
 
         std::vector<float> result(size);
-        uint32_t buf_idx = offset;
-        // Pre-compute calibration factors for speed (same as adc_to_voltage)
-        uint32_t range = adc_range_sel_;
-        const float gain = ltc2387.get_gain(0, range);     // LSB/V
-        const float adc_offset = ltc2387.get_offset(0, range); // LSB
-        const float scale_factor = 4.0f / gain; // *4 to convert 16-bit CIC to 18-bit equivalent
-        const float offset_factor = adc_offset / gain;
-
-        uint32_t samples_remaining = size;
-        while (samples_remaining > 0) {
-            // We always read a 32-bit word that contains two 16-bit samples.
-            uint32_t sample_byte_offset = buf_idx * 2;
-            uint32_t read_addr_bytes   = (sample_byte_offset & ~0x3); // align to 4-byte boundary
-            uint32_t word32            = ram_s2mm.read_reg(read_addr_bytes);
-
-            // Decode the two 16-bit lanes
-            int16_t s0 = static_cast<int16_t>(word32 & 0xFFFF);
-            int16_t s1 = static_cast<int16_t>(word32 >> 16);
-
-            // Decide which lane(s) are valid depending on even/odd alignment
-            bool even_alignment = (sample_byte_offset % 4) == 0;
-            if (even_alignment) {
-                // s0 first, then possibly s1
-                result[size - samples_remaining] = static_cast<float>(s0) * scale_factor - offset_factor;
-                samples_remaining--;
-                if (samples_remaining > 0) {
-                    result[size - samples_remaining] = static_cast<float>(s1) * scale_factor - offset_factor;
-                    samples_remaining--;
-                    buf_idx = (buf_idx + 2) % total_buffer_samples;
-                } else {
-                    buf_idx = (buf_idx + 1) % total_buffer_samples;
-                }
-            } else {
-                // odd alignment: s1 is the first valid sample in this word
-                result[size - samples_remaining] = static_cast<float>(s1) * scale_factor - offset_factor;
-                samples_remaining--;
-                buf_idx = (buf_idx + 1) % total_buffer_samples;
-            }
+        
+        for (uint32_t i = 0; i < size; i++) {
+            uint32_t buf_idx = (offset + i) % total_buffer_samples;
+            // Read 32-bit CIC+FIR output directly
+            uint32_t sample_byte_offset = buf_idx * 4;
+            int32_t adc_raw = static_cast<int32_t>(ram_s2mm.read_reg(sample_byte_offset));
+            
+            // Apply corrected voltage scaling
+            result[i] = adc_to_voltage(static_cast<uint32_t>(adc_raw));
         }
+        
         return result;
     }
 
@@ -670,19 +632,19 @@ class CurrentRamp
     }
     
     float adc_to_voltage(uint32_t adc_raw) {
-        // Use calibrated voltage conversion from LTC2387 driver
-        // This applies proper gain and offset corrections from EEPROM
+        // Use calibrated voltage conversion matching working alpha15 examples
+        // The CIC+FIR pipeline output needs proper scaling
         int32_t adc_signed = static_cast<int32_t>(adc_raw);
-        adc_signed <<= 14; // align sign to 32-bit
-        adc_signed >>= 14; // restore sign but keep 18-bit value
         
-        // Get calibration parameters for current range
-        uint32_t range = adc_range_sel_;
-        float gain = ltc2387.get_gain(0, range);     // LSB/V
-        float offset = ltc2387.get_offset(0, range); // LSB
+        // Get voltage range and apply scaling like working examples
+        double vrange = adc_range_sel_ ? 8.192 : 2.048;  // 8Vpp or 2Vpp range
+        constexpr double nmax = 262144.0; // 2^18 for 18-bit ADC
+        constexpr double cic_fir_compensation = 4096.0; // From working examples
         
-        // Apply calibration: voltage = (raw_value - offset) / gain
-        return (static_cast<float>(adc_signed) - offset) / gain;
+        // Apply the same scaling as working decimator example
+        double voltage = vrange * static_cast<double>(adc_signed) / nmax / cic_fir_compensation;
+        
+        return static_cast<float>(voltage);
     }
 
     // === ADC RANGE CONTROL ===
@@ -742,32 +704,16 @@ class CurrentRamp
         std::vector<float> result(num_samples);
         ctx.log<INFO>("Reading %u fresh samples from DMA circular buffer...", num_samples);
 
-        // 4. Read the data block, unpacking each 16-bit sample correctly.
+        // 4. Read the data block, unpacking each 32-bit sample correctly.
         for (uint32_t i = 0; i < num_samples; i++) {
             uint32_t buffer_idx = (start_sample_in_buffer + i) % total_buffer_samples;
             
-            // Correctly unpack 16-bit sample from 64-bit DMA bus accessed via 32-bit reads.
-            uint32_t sample_byte_offset = buffer_idx * 2;
-            uint32_t read_addr_bytes = (sample_byte_offset / 4) * 4;
-            uint32_t word32 = ram_s2mm.read_reg(read_addr_bytes);
+            // Read 32-bit CIC+FIR output directly (no more 16-bit unpacking)
+            uint32_t sample_byte_offset = buffer_idx * 4;
+            int32_t adc_raw = static_cast<int32_t>(ram_s2mm.read_reg(sample_byte_offset));
             
-            uint16_t raw_data = (sample_byte_offset % 4 == 0)
-                                    ? (word32 & 0xFFFF)
-                                    : (word32 >> 16);
-
-            int16_t adc_signed = static_cast<int16_t>(raw_data);
-            // Use calibrated voltage conversion (same as adc_to_voltage)
-            // Convert 16-bit CIC output back to 18-bit equivalent for calibration
-            int32_t adc_18bit = static_cast<int32_t>(adc_signed) << 2; // Scale up to 18-bit range
-            
-            // Get calibration parameters for current range
-            uint32_t range = adc_range_sel_;
-            float gain = ltc2387.get_gain(0, range);     // LSB/V
-            float adc_offset = ltc2387.get_offset(0, range); // LSB
-            
-            // Apply calibration: voltage = (raw_value - offset) / gain
-            float voltage = (static_cast<float>(adc_18bit) - adc_offset) / gain;
-            result[i] = voltage;
+            // Apply corrected voltage scaling
+            result[i] = adc_to_voltage(static_cast<uint32_t>(adc_raw));
         }
 
         ctx.log<INFO>("Data retrieval complete.");
@@ -827,9 +773,9 @@ class CurrentRamp
     void set_descriptors() {
         for (uint32_t i = 0; i < n_desc; i++) {
             // Corrected buffer allocation: each descriptor points to a region
-            // of size 2 * n_pts (since samples are 2 bytes).
-            // The buffer length for the DMA is also 2 * n_pts.
-            set_descriptor_s2mm(i, mem::ram_s2mm_addr + i * 2 * n_pts, 2 * n_pts);
+            // of size 4 * n_pts (since samples are now 4 bytes, not 2 bytes).
+            // The buffer length for the DMA is also 4 * n_pts.
+            set_descriptor_s2mm(i, mem::ram_s2mm_addr + i * 4 * n_pts, 4 * n_pts);
         }
     }
 };

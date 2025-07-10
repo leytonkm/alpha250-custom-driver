@@ -194,7 +194,7 @@ for {set i 0} {$i < 2} {incr i} {
 
 # ADC channel multiplexer
 cell koheron:user:bus_multiplexer:1.0 adc_mux {
-  WIDTH 16
+  WIDTH 24
 } {
   din0 adc_dac/adc0
   din1 adc_dac/adc1
@@ -208,7 +208,7 @@ set dec_rate_min [get_parameter cic_decimation_rate_min]
 set dec_rate_max [get_parameter cic_decimation_rate_max]
 set n_stages [get_parameter cic_n_stages]
 
-# CIC Decimator - Following phase-noise-analyzer exactly
+# CIC Decimator - Following working alpha15 examples exactly
 cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Filter_Type Decimation
   Number_Of_Stages $n_stages
@@ -219,10 +219,9 @@ cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Differential_Delay $diff_delay
   Input_Sample_Frequency 15
   Clock_Frequency [expr [get_parameter fclk0] / 1000000.]
-  Input_Data_Width 16
+  Input_Data_Width [get_parameter adc_width]
   Quantization Truncation
-  Output_Data_Width 16
-  Gain_Correction true
+  Output_Data_Width 32
   Use_Xtreme_DSP_Slice false
   HAS_DOUT_TREADY true
 } {
@@ -243,14 +242,33 @@ cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
 # Explicitly connect AXIS config interface between rate control and CIC (Vivado 2017.2 expects connect_bd_intf_net)
 connect_bd_intf_net [get_bd_intf_pins cic_rate_control/M_AXIS] [get_bd_intf_pins cic_decimator/S_AXIS_CONFIG]
 
-# Width converter: 16-bit stream to 64-bit for DMA
+# Add FIR filter for CIC compensation (following working alpha15 examples exactly)
+set fir_coeffs [exec $python $project_path/fir.py $n_stages $dec_rate_default $diff_delay print]
+
+cell xilinx.com:ip:fir_compiler:7.2 fir {
+  Filter_Type Decimation
+  Sample_Frequency [expr 15.0 / $dec_rate_default]
+  Clock_Frequency [expr [get_parameter fclk0] / 1000000.]
+  Coefficient_Width 32
+  Data_Width 32
+  Output_Rounding_Mode Convergent_Rounding_to_Even
+  Output_Width 32
+  Decimation_Rate 2
+  BestPrecision true
+  CoefficientVector [subst {{$fir_coeffs}}]
+} {
+  aclk adc_dac/adc_clk
+  S_AXIS_DATA cic_decimator/M_AXIS_DATA
+}
+
+# Width converter: 32-bit FIR stream to 64-bit for DMA
 cell xilinx.com:ip:axis_dwidth_converter:1.1 axis_dwidth_converter_0 {
-  S_TDATA_NUM_BYTES 2
+  S_TDATA_NUM_BYTES 4
   M_TDATA_NUM_BYTES 8
 } {
   aclk     adc_dac/adc_clk
   aresetn  rst_adc_clk/peripheral_aresetn
-  S_AXIS cic_decimator/M_AXIS_DATA
+  S_AXIS fir/M_AXIS_DATA
 }
 
 # Clock domain crossing: ADC clock to fabric clock
@@ -267,8 +285,8 @@ cell xilinx.com:ip:axis_clock_converter:1.1 axis_clock_converter_0 {
 # Packet generator for DMA transfers
 cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
   TDATA_WIDTH 64
-  # Shorter packet (~20 ms at 100 kS/s): 512 × 64-bit words = 2048 samples
-  PKT_LENGTH 512
+  # Shorter packet (~20 ms at 100 kS/s): 256 × 64-bit words = 512 samples (32-bit each)
+  PKT_LENGTH 256
 } {
   aclk ps_0/FCLK_CLK0
   resetn proc_sys_reset_0/peripheral_aresetn
