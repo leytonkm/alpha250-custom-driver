@@ -83,9 +83,14 @@ class CurrentRamp
         
         // Initialize CIC decimation rate to default (240MHz → 2.4MHz)
         set_decimation_rate(100);
+
+        // Set ADC to 8Vpp range (don't recalibrate clock delay)
+        ltc2387.range_select(0, 1); // Set channel 0 to 8Vpp
+        ltc2387.range_select(1, 1); // Set channel 1 to 8Vpp
         
         ctx.log<INFO>("CurrentRamp: Hardware ramp generator initialized, fs_adc = %.1f MHz", fs_adc / 1e6);
         ctx.log<INFO>("CurrentRamp: DMA streaming system initialized");
+        ctx.log<INFO>("CurrentRamp: ADC range set to 8Vpp");
     }
 
     ~CurrentRamp() {
@@ -335,14 +340,15 @@ class CurrentRamp
         // Write address of the starting descriptor
         dma.write<Dma_regs::s2mm_curdesc>(mem::ocm_mm2s_addr + 0x0);
         
-        // Start S2MM channel
-        dma.set_bit<Dma_regs::s2mm_dmacr, 0>();
+        // Start S2MM channel with cyclic mode enabled
+        dma.set_bit<Dma_regs::s2mm_dmacr, 4>(); // Enable cyclic mode
+        dma.set_bit<Dma_regs::s2mm_dmacr, 0>(); // Start DMA
         
         // Write address of the tail descriptor (this starts the transfer)
         dma.write<Dma_regs::s2mm_taildesc>(mem::ocm_mm2s_addr + (n_desc-1) * 0x40);
         
         streaming_active = true;
-        ctx.log<INFO>("DMA streaming started with %u descriptors", n_desc);
+        ctx.log<INFO>("DMA streaming started with %u descriptors in cyclic mode", n_desc);
     }
     
     void stop_streaming() {
@@ -690,6 +696,10 @@ class CurrentRamp
         ctx.log<INFO>("ADC input range set to %.1f Vpp", static_cast<double>(adc_range_vpp_));
     }
     
+    uint32_t get_adc_input_range() {
+        return static_cast<uint32_t>(adc_range_sel_);
+    }
+    
     float get_adc0_voltage() {
         return adc_to_voltage(get_adc0());
     }
@@ -781,8 +791,8 @@ class CurrentRamp
     
     // Clock and timing
     double fs_adc;  // ADC sampling frequency (Hz)
-    uint8_t adc_range_sel_ = 0; // 0=2Vpp,1=8Vpp
-    float   adc_range_vpp_ = 2.0f;
+    uint8_t adc_range_sel_ = 1; // 0=2Vpp,1=8Vpp (default to 8Vpp)
+    float   adc_range_vpp_ = 8.0f;
     
     // DC control state
     float dc_voltage;

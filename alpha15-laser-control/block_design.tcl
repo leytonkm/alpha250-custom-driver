@@ -52,6 +52,7 @@ cell xilinx.com:ip:mult_gen:12.0 ramp_amplitude_mult {
   OutputWidthLow 16
   PortAType Unsigned
   PortBType Unsigned
+  Latency 3
 } {
   CLK adc_dac/adc_clk
   A ramp_sawtooth/Dout
@@ -65,7 +66,7 @@ cell xilinx.com:ip:c_addsub:12.0 ramp_offset_add {
   Out_Width 16
   A_Type Unsigned
   B_Type Signed
-  Latency 1
+  Latency 3
   CE false
 } {
   CLK adc_dac/adc_clk
@@ -175,6 +176,22 @@ connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M02_AXI] [get_bd_intf_pin
 # Following phase-noise-analyzer pattern exactly
 ####################################
 
+# ADC Control Connections (CRITICAL - these were missing!)
+connect_pins [get_slice_pin [ctl_pin rf_adc_ctl0] 3 3] adc_dac/adc_clkout_dec
+connect_pins [get_slice_pin [ctl_pin adp5071_sync] 0 0] adc_dac/adp5071_sync_en
+connect_pins [get_slice_pin [ctl_pin adp5071_sync] 1 1] adc_dac/adp5071_sync_state
+
+for {set i 0} {$i < 2} {incr i} {
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 0 0] adc${i}_ctl_range_sel
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 1 1] adc${i}_ctl_testpat
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 2 2] adc${i}_ctl_en
+
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 8 4] adc_dac/adc${i}_dco_delay_tap
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 14 9] adc_dac/adc${i}_da_delay_tap
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 20 15] adc_dac/adc${i}_db_delay_tap
+  connect_pins [get_slice_pin [ctl_pin rf_adc_ctl$i] 21 21] adc_dac/adc${i}_delay_rst
+}
+
 # ADC channel multiplexer
 cell koheron:user:bus_multiplexer:1.0 adc_mux {
   WIDTH 16
@@ -200,8 +217,8 @@ cell xilinx.com:ip:cic_compiler:4.0 cic_decimator {
   Minimum_Rate $dec_rate_min
   Maximum_Rate $dec_rate_max
   Differential_Delay $diff_delay
-  Input_Sample_Frequency [expr [get_parameter adc_clk] / 1000000.]
-  Clock_Frequency [expr [get_parameter adc_clk] / 1000000.]
+  Input_Sample_Frequency 15
+  Clock_Frequency [expr [get_parameter fclk0] / 1000000.]
   Input_Data_Width 16
   Quantization Truncation
   Output_Data_Width 16
@@ -269,6 +286,7 @@ cell xilinx.com:ip:axi_dma:7.1 axi_dma_0 {
   c_s2mm_burst_size 16
   c_m_axi_s2mm_data_width 64
   c_include_mm2s 0
+  c_cyclic_enable 1
 } {
   S_AXI_LITE axi_mem_intercon_0/M[add_master_interface]_AXI
   s_axi_lite_aclk ps_0/FCLK_CLK0

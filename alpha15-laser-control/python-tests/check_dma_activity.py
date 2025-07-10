@@ -69,7 +69,7 @@ def main():
     print("=" * 50)
     
     try:
-        client = connect('192.168.1.20', 'currentramp', restart=False)
+        client = connect('192.168.1.115', 'alpha15-laser-control', restart=False)
         driver = CurrentRamp(client)
         
         # Check detailed DMA status

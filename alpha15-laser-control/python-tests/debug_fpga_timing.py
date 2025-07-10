@@ -84,12 +84,12 @@ class CurrentRamp:
         return self.client.recv_uint32()
 
 def connect_to_device():
-    """Connect to Alpha250 currentramp instrument"""
-    print("🔌 Connecting to Alpha250 currentramp...")
+    """Connect to Alpha15 currentramp instrument"""
+    print("🔌 Connecting to Alpha15 currentramp...")
     
     try:
-        host = os.environ.get('HOST', '192.168.1.20')
-        client = connect(host, 'currentramp', restart=False)
+        host = os.environ.get('HOST', '192.168.1.115')
+        client = connect(host, 'alpha15-laser-control', restart=False)
         driver = CurrentRamp(client)
         print(f"   ✅ Connected to {host}")
         return driver

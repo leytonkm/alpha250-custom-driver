@@ -105,6 +105,10 @@ class CurrentRamp:
         pass
 
     @command('CurrentRamp')
+    def get_adc_input_range(self):
+        return self.client.recv_uint32()
+
+    @command('CurrentRamp')
     def select_adc_channel(self, channel):
         pass
 
@@ -840,7 +844,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Initial ADC Setup ---
         # Select ADC channel 0 (RFADC0) and set range
         self.driver.select_adc_channel(0)
-        self.driver.set_adc_input_range(0)  # 2 Vpp range (more sensitive)
+        self.driver.set_adc_input_range(1)  # 8 Vpp range (for better signal visibility)
+        
+        # Initialize current ADC range to match the driver setting
+        self.current_adc_range = 1  # 8 Vpp
+        
+        # Check actual ADC range from driver and sync UI
+        try:
+            actual_range = self.driver.get_adc_input_range()
+            self.current_adc_range = actual_range
+            print(f"DEBUG: Driver ADC range is {actual_range} ({'2 Vpp' if actual_range == 0 else '8 Vpp'})")
+        except Exception as e:
+            print(f"DEBUG: Could not get ADC range from driver: {e}")
+            # Force set to 8 Vpp
+            self.driver.set_adc_input_range(1)
+            self.current_adc_range = 1
+            print("DEBUG: Forced ADC range to 8 Vpp")
         
         # --- Data Buffers ---
         self.time_scale_s = 5.0 # Default time window to display
@@ -860,6 +879,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_system.last_successful_trigger_time = time.time()
 
         # Allocate live buffers sized to current time window plus safety margin
+        # Set up live streaming buffers
         self.resize_live_buffers()
         self.buffer_ptr = 0
         self.sample_clock = 0  # 64-bit counter of total samples received
@@ -1095,7 +1115,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.setLabel('bottom', "Time", units='s')
         self.plot_widget.setLabel('left', "Voltage", units='V')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.setYRange(-0.5, 0.5)
+        
+        # Set initial Y range based on actual ADC range from driver
+        # (self.current_adc_range is set during initialization)
+        self.update_plot_y_range()
+        
         self.plot_widget.setXRange(0, 1.0)  # Set initial X range to avoid overflow warnings
 
         # --- Desmos-style Hover Elements (live plot only) ---
@@ -1127,6 +1151,8 @@ class MainWindow(QtWidgets.QMainWindow):
         range_layout = QtWidgets.QVBoxLayout()
         self.range_combo = QtWidgets.QComboBox()
         self.range_combo.addItems(["2 Vpp", "8 Vpp"])
+        # Sync with actual driver state (set during initialization)
+        self.range_combo.setCurrentIndex(self.current_adc_range)
         range_layout.addWidget(self.range_combo)
         range_group_box.setLayout(range_layout)
 
@@ -1317,12 +1343,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(bool)
     def toggle_streaming(self, checked):
+        """Toggle live streaming on/off."""
         if checked:
+            # Stop any running fixed-duration acquisition first
+            if self.run_worker and self.run_worker.isRunning():
+                self.run_worker.stop()
+                self.run_worker.wait()
+                print("DEBUG: Stopped run worker before starting live stream")
             self.start_streaming()
-            self.start_button.setText("Stop Streaming")
         else:
             self.stop_streaming()
-            self.start_button.setText("Start Streaming")
 
     def start_streaming(self):
         """Start live streaming with the LiveWorker thread."""
@@ -1357,16 +1387,37 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.live_worker:
             self.live_worker.stop()
             self.live_worker.wait() # Wait for thread to finish cleanly
+        
+        # Ensure DMA is properly stopped on hardware side
+        try:
+            self.driver.stop_adc_streaming()
+            print("DEBUG: DMA streaming stopped on hardware")
+        except Exception as e:
+            print(f"DEBUG: Error stopping DMA: {e}")
 
     def start_fixed_run(self):
         """Start the data acquisition worker for a fixed duration."""
+        # First, ensure any live streaming is completely stopped
+        if self.live_worker and self.live_worker.isRunning():
+            self.stop_streaming()
+            print("DEBUG: Stopped live streaming before starting run")
+        
+        # Ensure DMA is stopped before starting new acquisition
+        try:
+            self.driver.stop_adc_streaming()
+            print("DEBUG: Ensured DMA is stopped before run")
+        except Exception as e:
+            print(f"DEBUG: Error ensuring DMA stop: {e}")
+        
         # Compute decimation from user-selected sample rate
         desired_rate_k = self.rate_spinbox.value()
         desired_rate = desired_rate_k * 1000
         # Clamp to allowed range
         if desired_rate <= 0:
             desired_rate = 100000
-        dec_rate = math.ceil(240_000_000 / desired_rate)
+        # Use the correct ADC sampling frequency for Alpha15
+        FS_ADC = 15_000_000  # 15 MHz ADC sample clock
+        dec_rate = math.ceil(FS_ADC / desired_rate)
         dec_rate = max(10, min(8192, dec_rate))
 
         # Check that requested duration fits in max points
@@ -1403,6 +1454,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_run_worker_signals()
         self.run_worker.progress_updated.connect(self.run_progress_bar.setValue)
         self.run_worker.start()
+        
+        print(f"DEBUG: Started fixed run - {self.run_duration}s at {self.sample_rate/1e3:.1f} kHz")
 
     def reset_and_clear_buffers(self):
         self.buffer_ptr = 0
@@ -1482,8 +1535,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if abs(new_rate - self.sample_rate) / self.sample_rate > 0.01:
                     self.sample_rate = new_rate
                 # Always refresh the final plot with precisely trimmed data
-                x_data = np.arange(visible_samples) / self.sample_rate
+                # Ensure X and Y arrays are the same length
+                visible_samples = min(visible_samples, len(self.voltage_buffer))
                 y_data = self.voltage_buffer[:visible_samples]
+                x_data = np.arange(visible_samples) / self.sample_rate
                 self.plot_curve.setData(x=x_data, y=y_data)
                 # update duration in case of slight mismatch
                 run_duration_actual = visible_samples / self.sample_rate
@@ -1731,6 +1786,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 triggered_voltage = triggered_voltage[::stride]
                 final_time = final_time[::stride]
                 
+            # Ensure arrays have matching lengths
+            min_len = min(len(final_time), len(triggered_voltage))
+            final_time = final_time[:min_len]
+            triggered_voltage = triggered_voltage[:min_len]
+                
             # Store triggers for display update (avoid re-computation)
             self._last_triggers = triggers
             self._last_trigger_data = voltage_data
@@ -1744,35 +1804,58 @@ class MainWindow(QtWidgets.QMainWindow):
             return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
         
     def _update_trigger_display(self, x_data, y_data):
-        """Update trigger visualization on the plot - simplified"""
+        """Update trigger visualization on the plot - find actual trigger crossings"""
         if len(y_data) == 0:
             return
             
         # Update trigger level line
         self.trigger_line.setPos(self.trigger_system.level)
         
-        # Use stored triggers from _get_triggered_window to avoid re-computation
-        if hasattr(self, '_last_triggers') and len(self._last_triggers) > 0:
-            # Find actual trigger points in the displayed waveform
+        # Find actual trigger crossings in the displayed waveform
+        if len(x_data) > 1 and len(y_data) > 1:
             trigger_times = []
             trigger_voltages = []
             
-            # Since we start the window AT the first trigger, we know where it is
-            if len(x_data) > 0 and len(y_data) > 0:
-                # First trigger is at the start of our window (x=0)
-                trigger_times.append(0.0)
-                trigger_voltages.append(self.trigger_system.level)
-                
-                # If we have more triggers and know the period, show additional ones
-                if self.trigger_system.detected_period is not None and len(self._last_triggers) > 1:
-                    period_time = self.trigger_system.detected_period / self.sample_rate
+            # Look for trigger crossings in the displayed data
+            level = self.trigger_system.level
+            edge = self.trigger_system.edge
+            
+            # Find crossings based on trigger mode
+            if self.trigger_system.mode == 'auto':
+                # For auto mode, look for rising edges crossing the level
+                for i in range(1, len(y_data)):
+                    if y_data[i-1] < level and y_data[i] >= level:
+                        # Linear interpolation to find exact crossing point
+                        if y_data[i] != y_data[i-1]:
+                            frac = (level - y_data[i-1]) / (y_data[i] - y_data[i-1])
+                            trigger_time = x_data[i-1] + frac * (x_data[i] - x_data[i-1])
+                        else:
+                            trigger_time = x_data[i]
+                        trigger_times.append(trigger_time)
+                        trigger_voltages.append(level)
+            else:
+                # For normal mode, respect the edge setting
+                for i in range(1, len(y_data)):
+                    crossing = False
+                    if edge == 'rising' and y_data[i-1] < level and y_data[i] >= level:
+                        crossing = True
+                    elif edge == 'falling' and y_data[i-1] > level and y_data[i] <= level:
+                        crossing = True
                     
-                    # Show up to 3 trigger points within our display window
-                    for i in range(1, min(4, int(self.trigger_system.periods_to_display) + 1)):
-                        trigger_time = i * period_time
-                        if trigger_time < x_data[-1]:  # Make sure it's within our window
-                            trigger_times.append(trigger_time)
-                            trigger_voltages.append(self.trigger_system.level)
+                    if crossing:
+                        # Linear interpolation to find exact crossing point
+                        if y_data[i] != y_data[i-1]:
+                            frac = (level - y_data[i-1]) / (y_data[i] - y_data[i-1])
+                            trigger_time = x_data[i-1] + frac * (x_data[i] - x_data[i-1])
+                        else:
+                            trigger_time = x_data[i]
+                        trigger_times.append(trigger_time)
+                        trigger_voltages.append(level)
+            
+            # Limit to reasonable number of markers for performance
+            if len(trigger_times) > 10:
+                trigger_times = trigger_times[:10]
+                trigger_voltages = trigger_voltages[:10]
             
             if len(trigger_times) > 0:
                 self.trigger_markers.setData(trigger_times, trigger_voltages)
@@ -1820,11 +1903,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
         self.trigger_markers.setData([], [])
 
+    def update_plot_y_range(self):
+        """Update plot Y-axis range based on current ADC range setting"""
+        if self.current_adc_range == 0:
+            # 2 Vpp = ±1V
+            y_min, y_max = -1.0, 1.0
+            range_text = "2 Vpp (±1V)"
+        else:
+            # 8 Vpp = ±4V
+            y_min, y_max = -4.0, 4.0
+            range_text = "8 Vpp (±4V)"
+        
+        self.plot_widget.setYRange(y_min, y_max)
+        self.trigger_level_spinbox.setRange(y_min, y_max)
+        print(f"Plot Y-axis updated for {range_text}")
+
     def on_adc_range_changed(self, idx):
         """Handle ADC input range change (0 = 2 Vpp, 1 = 8 Vpp)"""
         try:
+            self.current_adc_range = idx
             self.driver.set_adc_input_range(int(idx))
-            self.status_bar.showMessage(f"ADC range set to {'2' if idx==0 else '8'} Vpp")
+            self.update_plot_y_range()
+            range_text = "2 Vpp" if idx == 0 else "8 Vpp"
+            self.status_bar.showMessage(f"ADC range set to {range_text} - Plot auto-scaled")
         except Exception as e:
             self.status_bar.showMessage(f"Failed to set ADC range: {e}")
 
