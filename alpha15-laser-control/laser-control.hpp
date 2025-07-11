@@ -639,7 +639,7 @@ class CurrentRamp
         // Get voltage range and apply scaling like working examples
         double vrange = adc_range_sel_ ? 8.192 : 2.048;  // 8Vpp or 2Vpp range
         constexpr double nmax = 262144.0; // 2^18 for 18-bit ADC
-        constexpr double cic_fir_compensation = 4096.0; // From working examples
+        constexpr double cic_fir_compensation = 2735.0; // calculated based on dma pipeline compensation
         
         // Apply the same scaling as working decimator example
         double voltage = vrange * static_cast<double>(adc_signed) / nmax / cic_fir_compensation;

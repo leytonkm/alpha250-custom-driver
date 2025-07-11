@@ -892,7 +892,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_ui()
         self.connect_signals()
 
-        self.set_time_scale(self.time_scale_s)
+        # Set initial time scale to match dropdown default
+        self.set_time_scale(5.0)
         self.status_bar.showMessage("Ready. Connect to an instrument and start streaming.")
 
     # ------------------------------------------------------------------
@@ -942,16 +943,139 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-color: #4CAF50;
             }
         """)
-        self.ts_group_box = QtWidgets.QGroupBox("Time Scale")
-        ts_layout = QtWidgets.QVBoxLayout()
-        self.ts_radios = {}
-        for val in [1.0, 2.0, 5.0, 10.0]:
-            self.ts_radios[val] = QtWidgets.QRadioButton(f"{val} s")
-            ts_layout.addWidget(self.ts_radios[val])
-        self.ts_radios[self.time_scale_s].setChecked(True)
-        self.ts_group_box.setLayout(ts_layout)
         streaming_layout.addWidget(self.start_button)
-        streaming_layout.addWidget(self.ts_group_box)
+        
+        # Time Scale dropdown
+        ts_layout = QtWidgets.QHBoxLayout()
+        ts_layout.addWidget(QtWidgets.QLabel("Time Scale:"))
+        self.time_scale_combo = QtWidgets.QComboBox()
+        
+        # Define time scale options (value in seconds, display text)
+        self.time_scale_options = [
+            (0.001, "1 ms"),
+            (0.002, "2 ms"), 
+            (0.005, "5 ms"),
+            (0.01, "10 ms"),
+            (0.02, "20 ms"),
+            (0.05, "50 ms"),
+            (0.1, "100 ms"),
+            (0.2, "200 ms"),
+            (0.5, "500 ms"),
+            (1.0, "1 s"),
+            (2.0, "2 s"),
+            (5.0, "5 s"),
+            (10.0, "10 s"),
+            (20.0, "20 s"),
+            (50.0, "50 s"),
+        ]
+        
+        # Populate dropdown and set default
+        for value, text in self.time_scale_options:
+            self.time_scale_combo.addItem(text, value)
+        
+        # Set default to 5 seconds
+        default_index = next(i for i, (val, _) in enumerate(self.time_scale_options) if val == 5.0)
+        self.time_scale_combo.setCurrentIndex(default_index)
+        
+        ts_layout.addWidget(self.time_scale_combo)
+        streaming_layout.addLayout(ts_layout)
+        
+        # Autoscale button
+        self.autoscale_button = QtWidgets.QPushButton("Autoscale Voltage")
+        self.autoscale_button.setToolTip("Automatically adjust plot Y-axis to fit the current signal range")
+        self.autoscale_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:checked {
+                background-color: #FFB6C1;
+                border-color: #FF69B4;
+            }
+        """)
+        streaming_layout.addWidget(self.autoscale_button)
+        
+        # ADC Range control - segmented control style
+        adc_range_layout = QtWidgets.QHBoxLayout()
+        adc_range_layout.addWidget(QtWidgets.QLabel("ADC Range:"))
+        
+        # Create button group for mutual exclusion
+        self.range_button_group = QtWidgets.QButtonGroup()
+        
+        # Segmented control container
+        range_container = QtWidgets.QWidget()
+        range_button_layout = QtWidgets.QHBoxLayout(range_container)
+        range_button_layout.setContentsMargins(0, 0, 0, 0)
+        range_button_layout.setSpacing(0)
+        
+        # 2V button (left side of segmented control)
+        self.range_2v_button = QtWidgets.QPushButton("2V")
+        self.range_2v_button.setCheckable(True)
+        self.range_2v_button.setFixedHeight(28)
+        self.range_2v_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #4A90E2;
+                border-right: 1px solid #4A90E2;
+                border-top-left-radius: 6px;
+                border-bottom-left-radius: 6px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
+                                 color: #4A90E2;
+                 font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #4A90E2;
+                color: white;
+            }
+            QPushButton:hover:!checked {
+                background-color: #E3F2FD;
+            }
+        """)
+        
+        # 8V button (right side of segmented control)
+        self.range_8v_button = QtWidgets.QPushButton("8V")
+        self.range_8v_button.setCheckable(True)
+        self.range_8v_button.setFixedHeight(28)
+        self.range_8v_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #FF6B35;
+                border-left: 1px solid #FF6B35;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+                                 color: #FF6B35;
+                 font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #FF6B35;
+                color: white;
+            }
+            QPushButton:hover:!checked {
+                background-color: #FFF3E0;
+            }
+        """)
+        
+        # Add buttons to group and layout with equal stretching
+        self.range_button_group.addButton(self.range_2v_button, 0)
+        self.range_button_group.addButton(self.range_8v_button, 1)
+        range_button_layout.addWidget(self.range_2v_button, 1)  # stretch factor 1
+        range_button_layout.addWidget(self.range_8v_button, 1)  # stretch factor 1
+        
+        adc_range_layout.addWidget(range_container)
+        
+        # Set initial state based on driver setting
+        if self.current_adc_range == 0:
+            self.range_2v_button.setChecked(True)
+        else:
+            self.range_8v_button.setChecked(True)
+            
+        streaming_layout.addLayout(adc_range_layout)
+        
         streaming_group_box.setLayout(streaming_layout)
 
         # --- Trigger Controls ---
@@ -985,11 +1109,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 2px solid #ccc;
                 border-radius: 5px;
                 padding: 5px;
-                font-weight: bold;
             }
             QPushButton:checked {
-                background-color: #FFB6C1;
-                border-color: #FF69B4;
+                background-color: #afd6fa;
+                border-color: #4da9fe;
             }
         """)
         trigger_layout.addWidget(self.freeze_button)
@@ -1023,14 +1146,46 @@ class MainWindow(QtWidgets.QMainWindow):
         trigger_edge_layout.addWidget(self.trigger_edge_combo)
         trigger_layout.addLayout(trigger_edge_layout)
         
-        # Auto level button
+        # Auto level and reset buttons (compact, same line)
+        trigger_buttons_layout = QtWidgets.QHBoxLayout()
         self.auto_level_button = QtWidgets.QPushButton("Auto Level")
-        trigger_layout.addWidget(self.auto_level_button)
+        self.auto_level_button.setMinimumWidth(95)
+        self.auto_level_button.setMaximumWidth(95)
+        self.auto_level_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 3px;
+                padding: 3px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+                border-color: #aaa;
+            }
+        """)
+        trigger_buttons_layout.addWidget(self.auto_level_button)
         
-        # Reset trigger button
         self.reset_trigger_button = QtWidgets.QPushButton("Force Reset")
         self.reset_trigger_button.setToolTip("Force reset trigger system and clear all period detection")
-        trigger_layout.addWidget(self.reset_trigger_button)
+        self.reset_trigger_button.setMinimumWidth(95)
+        self.reset_trigger_button.setMaximumWidth(95)
+        self.reset_trigger_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 3px;
+                padding: 3px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+                border-color: #aaa;
+            }
+        """)
+        trigger_buttons_layout.addWidget(self.reset_trigger_button)
+        
+        trigger_layout.addLayout(trigger_buttons_layout)
         
         # Periods to display control
         periods_layout = QtWidgets.QHBoxLayout()
@@ -1064,21 +1219,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.duration_spinbox.setValue(1.0)
         run_layout.addWidget(self.duration_spinbox, 0, 1)
 
-        # Sample rate control (visible rate after decimation)
-        run_layout.addWidget(QtWidgets.QLabel("Rate:"), 1, 0)
-        self.rate_spinbox = QtWidgets.QSpinBox()
-        self.rate_spinbox.setRange(1, 1000)  # 1 kS/s to 1 MS/s
-        self.rate_spinbox.setSuffix(" kHz")
-        self.rate_spinbox.setValue(100)  # default 100 kS/s
-        run_layout.addWidget(self.rate_spinbox, 1, 1)
         self.run_button = QtWidgets.QPushButton("Start Run")
-        run_layout.addWidget(self.run_button, 2, 0, 1, 2)
-        self.effective_rate_label = QtWidgets.QLabel("Rate: -- kHz")
+        run_layout.addWidget(self.run_button, 1, 0, 1, 2)
+        self.effective_rate_label = QtWidgets.QLabel("Rate: -- kHz | Max: -- s")
         self.effective_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        run_layout.addWidget(self.effective_rate_label, 3, 0, 1, 2)
+        self.effective_rate_label.setStyleSheet("QLabel { font-size: 10px; color: #666; }")
+        run_layout.addWidget(self.effective_rate_label, 2, 0, 1, 2)
         self.run_progress_bar = QtWidgets.QProgressBar()
         self.run_progress_bar.setTextVisible(False)
-        run_layout.addWidget(self.run_progress_bar, 4, 0, 1, 2)
+        run_layout.addWidget(self.run_progress_bar, 3, 0, 1, 2)
         run_group_box.setLayout(run_layout)
 
         # --- Locked Coordinate Display ---
@@ -1146,28 +1295,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Status Bar ---
         self.status_bar = self.statusBar()
 
-        # --- ADC Range selection ---
-        range_group_box = QtWidgets.QGroupBox("ADC Range")
-        range_layout = QtWidgets.QVBoxLayout()
-        self.range_combo = QtWidgets.QComboBox()
-        self.range_combo.addItems(["2 Vpp", "8 Vpp"])
-        # Sync with actual driver state (set during initialization)
-        self.range_combo.setCurrentIndex(self.current_adc_range)
-        range_layout.addWidget(self.range_combo)
-        range_group_box.setLayout(range_layout)
 
-        control_layout.addWidget(range_group_box)
 
     def connect_signals(self):
         """Connect UI signals to slots."""
         self.start_button.toggled.connect(self.toggle_streaming)
         self.run_button.clicked.connect(self.start_fixed_run)
-        for val, radio in self.ts_radios.items():
-            radio.toggled.connect(lambda checked, v=val: self.set_time_scale(v) if checked else None)
+        self.time_scale_combo.currentIndexChanged.connect(self.on_time_scale_changed)
 
         # Update max duration label dynamically
         self.duration_spinbox.valueChanged.connect(self.update_max_duration)
-        self.rate_spinbox.valueChanged.connect(self.update_max_duration)
 
         # Connect plot interaction signals
         self.plot_widget.scene().sigMouseMoved.connect(self.update_crosshair)
@@ -1181,10 +1318,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_level_button.clicked.connect(self.on_auto_level_clicked)
         self.periods_spinbox.valueChanged.connect(self.on_periods_changed)
         self.reset_trigger_button.clicked.connect(self.reset_trigger_system)
-        self.range_combo.currentIndexChanged.connect(self.on_adc_range_changed)
+        self.range_button_group.buttonClicked.connect(self.on_adc_range_button_clicked)
+        self.autoscale_button.clicked.connect(self.on_autoscale_voltage)
 
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
+        
+    def on_time_scale_changed(self):
+        """Handle time scale dropdown change"""
+        current_index = self.time_scale_combo.currentIndex()
+        if current_index >= 0:
+            selected_value = self.time_scale_options[current_index][0]
+            self.set_time_scale(selected_value)
 
     def update_crosshair(self, pos):
         """Handle mouse movement on the plot for crosshair."""
@@ -1340,6 +1485,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_periods_changed(self):
         """Update the number of periods to display in the triggered window."""
         self.trigger_system.periods_to_display = self.periods_spinbox.value()
+        
+    def on_autoscale_voltage(self):
+        """Automatically scale the Y-axis to fit the current visible data."""
+        try:
+            x_data, y_data = self.plot_curve.getData()
+            if x_data is not None and y_data is not None and len(y_data) > 0:
+                y_min = float(np.min(y_data))
+                y_max = float(np.max(y_data))
+                
+                # Add 5% margin on each side
+                y_range = y_max - y_min
+                if y_range > 0:
+                    margin = y_range * 0.05
+                    self.plot_widget.setYRange(y_min - margin, y_max + margin)
+                    self.status_bar.showMessage(f"Autoscaled voltage: {y_min:.3f}V to {y_max:.3f}V")
+                else:
+                    # Handle flat signal case
+                    margin = 0.1 if abs(y_min) < 0.001 else abs(y_min) * 0.1
+                    self.plot_widget.setYRange(y_min - margin, y_min + margin)
+                    self.status_bar.showMessage(f"Autoscaled flat signal: {y_min:.3f}V ±{margin:.3f}V")
+            else:
+                self.status_bar.showMessage("No data available for autoscaling")
+        except Exception as e:
+            self.status_bar.showMessage(f"Autoscale failed: {str(e)}")
 
     @QtCore.pyqtSlot(bool)
     def toggle_streaming(self, checked):
@@ -1409,27 +1578,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"DEBUG: Error ensuring DMA stop: {e}")
         
-        # Compute decimation from user-selected sample rate
-        desired_rate_k = self.rate_spinbox.value()
-        desired_rate = desired_rate_k * 1000
-        # Clamp to allowed range
-        if desired_rate <= 0:
-            desired_rate = 100000
-        # Use the correct ADC sampling frequency for Alpha15
-        FS_ADC = 15_000_000  # 15 MHz ADC sample clock
-        dec_rate = math.ceil(FS_ADC / desired_rate)
-        dec_rate = max(10, min(8192, dec_rate))
-
+        # Use current sample rate (no user rate selection)
         # Check that requested duration fits in max points
-        max_duration = MAX_VISIBLE_SAMPLES / desired_rate
+        max_duration = MAX_VISIBLE_SAMPLES / self.sample_rate
         if self.run_duration > max_duration:
             QtWidgets.QMessageBox.warning(self, "Duration too long", 
-                f"At {desired_rate_k} kHz the maximum duration is {max_duration:.2f} s.")
+                f"At {self.sample_rate/1000:.0f} kHz the maximum duration is {max_duration:.2f} s.")
             return
-
-        self.driver.set_decimation_rate(dec_rate)
-        self.sample_rate = self.driver.get_decimated_sample_rate()
-        self.effective_rate_label.setText(f"Rate: {self.sample_rate/1e3:.1f} kHz  |  Max {max_duration:.2f} s")
         self.is_fixed_run = True
         self.run_duration = self.duration_spinbox.value()
         visible_samples_goal = math.ceil(self.run_duration * self.sample_rate * SAFETY_FACTOR)
@@ -1441,8 +1596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button.setEnabled(False)
         self.run_button.setEnabled(False)
         self.duration_spinbox.setEnabled(False)
-        self.rate_spinbox.setEnabled(False)
-        self.ts_group_box.setEnabled(False)
+        self.time_scale_combo.setEnabled(False)
         
         self.plot_widget.setXRange(0, self.run_duration)
         self.run_progress_bar.setValue(0)
@@ -1517,8 +1671,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button.setChecked(False)
         self.run_button.setEnabled(True)
         self.duration_spinbox.setEnabled(True)
-        self.rate_spinbox.setEnabled(True)
-        self.ts_group_box.setEnabled(True)
+        self.time_scale_combo.setEnabled(True)
 
         if self.is_fixed_run:
             # Remove guard samples from analysis
@@ -1573,7 +1726,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize_live_buffers()
         self.reset_and_clear_buffers()
         self.plot_curve.setData(x=[], y=[])
-        self.status_bar.showMessage(f"Time scale set to {scale_s}s (rate {self.sample_rate/1e3:.1f} kHz)")
+        # Format time scale display with appropriate units
+        if scale_s >= 1.0:
+            time_text = f"{scale_s:.0f}s" if scale_s == int(scale_s) else f"{scale_s:.1f}s"
+        else:
+            time_text = f"{scale_s*1000:.0f}ms"
+        self.status_bar.showMessage(f"Time scale set to {time_text} (rate {self.sample_rate/1e3:.1f} kHz)")
 
     @QtCore.pyqtSlot(np.ndarray)
     def update_main_plot_from_run(self, new_data):
@@ -1625,10 +1783,19 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
     def update_max_duration(self):
-        desired_rate_k = self.rate_spinbox.value()
-        desired_rate = desired_rate_k * 1000
-        max_duration = MAX_VISIBLE_SAMPLES / desired_rate if desired_rate > 0 else 0
-        self.effective_rate_label.setText(f"Max T: {max_duration:.2f} s")
+        current_rate = self.sample_rate if hasattr(self, 'sample_rate') else 75000  # Default 75kHz
+        max_duration = MAX_VISIBLE_SAMPLES / current_rate if current_rate > 0 else 0
+        
+        # Debug: Show both expected and actual rates
+        if hasattr(self, 'driver'):
+            try:
+                actual_decimation = self.driver.get_decimation_rate()
+                expected_rate = 15_000_000 / (2.0 * actual_decimation)
+                self.effective_rate_label.setText(f"Rate: {current_rate/1000:.0f} kHz (dec={actual_decimation}) | Max: {max_duration:.2f} s")
+            except:
+                self.effective_rate_label.setText(f"Rate: {current_rate/1000:.0f} kHz | Max: {max_duration:.2f} s")
+        else:
+            self.effective_rate_label.setText(f"Rate: {current_rate/1000:.0f} kHz | Max: {max_duration:.2f} s")
 
     @QtCore.pyqtSlot(np.ndarray)
     def update_live_plot(self, new_data):
@@ -1918,14 +2085,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_level_spinbox.setRange(y_min, y_max)
         print(f"Plot Y-axis updated for {range_text}")
 
-    def on_adc_range_changed(self, idx):
-        """Handle ADC input range change (0 = 2 Vpp, 1 = 8 Vpp)"""
+    def on_adc_range_button_clicked(self, button):
+        """Handle ADC input range button click (0 = 2V, 1 = 8V)"""
         try:
+            # Get the button ID from the button group
+            idx = self.range_button_group.id(button)
             self.current_adc_range = idx
             self.driver.set_adc_input_range(int(idx))
             self.update_plot_y_range()
-            range_text = "2 Vpp" if idx == 0 else "8 Vpp"
-            self.status_bar.showMessage(f"ADC range set to {range_text} - Plot auto-scaled")
+            range_text = "2V" if idx == 0 else "8V"
+            voltage_range = "±1V" if idx == 0 else "±4V"
+            self.status_bar.showMessage(f"ADC range set to {range_text} ({voltage_range}) - Plot auto-scaled")
         except Exception as e:
             self.status_bar.showMessage(f"Failed to set ADC range: {e}")
 
