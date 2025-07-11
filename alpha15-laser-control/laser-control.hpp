@@ -179,8 +179,10 @@ class CurrentRamp
         ramp_frequency = frequency;
         
         // Calculate phase increment for DDS
-        // Phase increment = (desired_freq * 2^32) / sampling_freq
-        double phase_inc_factor = (1ULL << 32) / fs_adc;
+        // Phase increment = (desired_freq * 2^32) / DDS_clock_freq
+        // NOTE: DDS runs at adc_clk (240 MHz), NOT ADC sampling frequency (15 MHz)
+        constexpr double dds_clock_freq = 240e6;  // 240 MHz from config adc_clk parameter
+        double phase_inc_factor = (1ULL << 32) / dds_clock_freq;
         uint32_t phase_increment = static_cast<uint32_t>(frequency * phase_inc_factor);
         
         ctl.write<reg::ramp_freq_incr>(phase_increment);

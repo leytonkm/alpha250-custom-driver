@@ -1017,18 +1017,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.range_2v_button.setStyleSheet("""
             QPushButton {
                 background-color: #f0f0f0;
-                border: 2px solid #4A90E2;
+                border: 2px solid #aeaeae;
                 border-right: 1px solid #4A90E2;
                 border-top-left-radius: 6px;
                 border-bottom-left-radius: 6px;
                 border-top-right-radius: 0px;
                 border-bottom-right-radius: 0px;
-                                 color: #4A90E2;
-                 font-weight: bold;
-            }
+                                 color: #aeaeae;
+=            }
             QPushButton:checked {
-                background-color: #4A90E2;
-                color: white;
+                background-color: #aeaeae;
+                color: black;
             }
             QPushButton:hover:!checked {
                 background-color: #E3F2FD;
@@ -1042,18 +1041,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.range_8v_button.setStyleSheet("""
             QPushButton {
                 background-color: #f0f0f0;
-                border: 2px solid #FF6B35;
-                border-left: 1px solid #FF6B35;
+                border: 2px solid #aeaeae;
+                border-left: 1px solid #aeaeae;
                 border-top-left-radius: 0px;
                 border-bottom-left-radius: 0px;
                 border-top-right-radius: 6px;
                 border-bottom-right-radius: 6px;
-                                 color: #FF6B35;
-                 font-weight: bold;
-            }
+                                 color: #aeaeae;
+=            }
             QPushButton:checked {
-                background-color: #FF6B35;
-                color: white;
+                background-color: #aeaeae;
+                color: black;
             }
             QPushButton:hover:!checked {
                 background-color: #FFF3E0;
@@ -1146,6 +1144,17 @@ class MainWindow(QtWidgets.QMainWindow):
         trigger_edge_layout.addWidget(self.trigger_edge_combo)
         trigger_layout.addLayout(trigger_edge_layout)
         
+        # Periods to display control
+        periods_layout = QtWidgets.QHBoxLayout()
+        periods_layout.addWidget(QtWidgets.QLabel("Periods:"))
+        self.periods_spinbox = QtWidgets.QDoubleSpinBox()
+        self.periods_spinbox.setRange(1.0, 5.0)
+        self.periods_spinbox.setDecimals(1)
+        self.periods_spinbox.setSingleStep(0.5)
+        self.periods_spinbox.setValue(2.0)  # Default to 2 periods
+        periods_layout.addWidget(self.periods_spinbox)
+        trigger_layout.addLayout(periods_layout)
+        
         # Auto level and reset buttons (compact, same line)
         trigger_buttons_layout = QtWidgets.QHBoxLayout()
         self.auto_level_button = QtWidgets.QPushButton("Auto Level")
@@ -1187,17 +1196,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         trigger_layout.addLayout(trigger_buttons_layout)
         
-        # Periods to display control
-        periods_layout = QtWidgets.QHBoxLayout()
-        periods_layout.addWidget(QtWidgets.QLabel("Periods:"))
-        self.periods_spinbox = QtWidgets.QDoubleSpinBox()
-        self.periods_spinbox.setRange(1.0, 5.0)
-        self.periods_spinbox.setDecimals(1)
-        self.periods_spinbox.setSingleStep(0.5)
-        self.periods_spinbox.setValue(2.0)  # Default to 2 periods
-        periods_layout.addWidget(self.periods_spinbox)
-        trigger_layout.addLayout(periods_layout)
-        
         # Trigger status display
         self.trigger_status_label = QtWidgets.QLabel("Status: Disabled")
         self.trigger_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -1220,6 +1218,18 @@ class MainWindow(QtWidgets.QMainWindow):
         run_layout.addWidget(self.duration_spinbox, 0, 1)
 
         self.run_button = QtWidgets.QPushButton("Start Run")
+        self.run_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:checked {
+                background-color: #FFE4B5;
+                border-color: #FFA500;
+            }
+        """)
         run_layout.addWidget(self.run_button, 1, 0, 1, 2)
         self.effective_rate_label = QtWidgets.QLabel("Rate: -- kHz | Max: -- s")
         self.effective_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
