@@ -170,21 +170,13 @@ class TriggerSystem:
             
             # Adaptive minimum distance based on detected period
             if self.detected_period is not None:
-                # Check if we haven't had successful triggers recently (frequency decrease scenario)
-                import time
-                if (self.last_successful_trigger_time is not None and 
-                    time.time() - self.last_successful_trigger_time > 1.0):  # No triggers for 1 second
-                    # Use more conservative distance to allow longer periods
-                    min_distance = max(10, len(data) // 100)  # Much smaller distance
-                    print("Using conservative distance for potential frequency decrease")
-                else:
-                    # Use 1/4 of the detected period as minimum distance
-                    min_distance = max(10, self.detected_period // 4)
-                    # For very long periods, cap the minimum distance to prevent excessive spacing
-                    min_distance = min(min_distance, len(data) // 10)
+                # Use 1/4 of the detected period as minimum distance for all frequencies
+                min_distance = max(5, self.detected_period // 4)  # Reduced minimum for high freq
+                # Cap the minimum distance to prevent excessive spacing
+                min_distance = min(min_distance, len(data) // 10)
             else:
                 # Fallback: scale with data length
-                min_distance = max(10, len(data) // 50)
+                min_distance = max(5, len(data) // 50)  # Reduced minimum for high freq
             
             from scipy.signal import find_peaks
             peaks, _ = find_peaks(data, height=min_height, distance=min_distance)
@@ -231,21 +223,13 @@ class TriggerSystem:
             
             # Adaptive minimum distance based on detected period
             if self.detected_period is not None:
-                # Check if we haven't had successful triggers recently (frequency decrease scenario)
-                import time
-                if (self.last_successful_trigger_time is not None and 
-                    time.time() - self.last_successful_trigger_time > 1.0):  # No triggers for 1 second
-                    # Use more conservative distance to allow longer periods
-                    min_distance = max(10, len(data) // 100)  # Much smaller distance
-                    print("Edge detection using conservative distance for potential frequency decrease")
-                else:
-                    # Use 1/4 of the detected period as minimum distance
-                    min_distance = max(10, self.detected_period // 4)
-                    # For very long periods, cap the minimum distance to prevent excessive spacing
-                    min_distance = min(min_distance, len(data) // 10)
+                # Use 1/4 of the detected period as minimum distance for all frequencies
+                min_distance = max(5, self.detected_period // 4)  # Reduced minimum for high freq
+                # Cap the minimum distance to prevent excessive spacing
+                min_distance = min(min_distance, len(data) // 10)
             else:
                 # Fallback: scale with data length
-                min_distance = max(10, len(data) // 50)
+                min_distance = max(5, len(data) // 50)  # Reduced minimum for high freq
             
             from scipy.signal import find_peaks
             if self.edge == 'rising':
@@ -403,9 +387,10 @@ class TriggerSystem:
             # Validate new period against existing history
             if len(self.period_history) > 0:
                 median_period = np.median(self.period_history)
-                # More aggressive change detection for frequency switches (>20% change)
+                # More tolerant change detection - increased threshold for high frequencies
+                # Use 50% threshold to handle frequency increases better (e.g., 500Hz to 750Hz = 33% change)
                 period_change_ratio = abs(new_period - median_period) / median_period
-                if period_change_ratio > 0.2:  # 20% change threshold
+                if period_change_ratio > 0.5:  # Increased from 0.2 to 0.5 for better high-freq support
                     print(f"Significant period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
                     self.period_history = []
             
@@ -459,13 +444,15 @@ class TriggerSystem:
             if len(triggers) > 1:
                 # Use period-based holdoff if available
                 if self.detected_period is not None:
-                    # More conservative holdoff for 3-5Hz range
+                    # Improved holdoff for all frequencies
                     if self.detected_period > 20000:  # > 0.2 seconds (< 5Hz)
                         min_distance = max(20, self.detected_period // 10)  # 1/10 of period for low freq
+                    elif self.detected_period < 1000:  # High frequencies (>75Hz at 75kHz)
+                        min_distance = max(5, self.detected_period // 6)  # 1/6 of period for high freq
                     else:
-                        min_distance = max(10, self.detected_period // 8)  # 1/8 of period for higher freq
+                        min_distance = max(8, self.detected_period // 8)  # 1/8 of period for medium freq
                 else:
-                    min_distance = 20  # Fixed minimum distance as fallback
+                    min_distance = 15  # Reduced fixed minimum distance as fallback
                     
                 filtered_triggers = [triggers[0]]
                 for trigger in triggers[1:]:
@@ -508,15 +495,7 @@ class TriggerSystem:
             return np.array([])  # Return empty array on any error
         
     def _auto_trigger_simple(self, data):
-        """Simple auto trigger - try only 3 methods with frequency decrease handling"""
-        # Check if we're in a potential frequency decrease scenario
-        import time
-        frequency_decrease_mode = (self.last_successful_trigger_time is not None and 
-                                 time.time() - self.last_successful_trigger_time > 1.0)
-        
-        if frequency_decrease_mode:
-            print("Auto-trigger: Potential frequency decrease detected, trying all methods")
-            
+        """Simple auto trigger - try only 3 methods"""
         # For low frequencies (detected period > 0.2 seconds), try hysteresis first
         if self.detected_period is not None and self.detected_period > 20000:  # > 0.2 seconds at 100kHz (< 5Hz)
             # Try hysteresis first for low frequencies (including 3-5Hz range)
@@ -524,26 +503,20 @@ class TriggerSystem:
             if len(hysteresis) >= 1:
                 return hysteresis
         
-        # Try peaks first (but be more lenient in frequency decrease mode)
+        # Try peaks first 
         peaks = self.find_peaks_simple(data)
-        if len(peaks) >= 2 or (frequency_decrease_mode and len(peaks) >= 1):
+        if len(peaks) >= 2:
             return peaks
             
-        # Try zero crossings (be more lenient in frequency decrease mode)
+        # Try zero crossings
         crossings = self.find_zero_crossings_simple(data)
-        if len(crossings) >= 2 or (frequency_decrease_mode and len(crossings) >= 1):
+        if len(crossings) >= 2:
             return crossings
             
-        # Try hysteresis (always try in frequency decrease mode)
+        # Try hysteresis as fallback
         hysteresis = self.find_hysteresis_triggers(data)
         if len(hysteresis) >= 1:
             return hysteresis
-            
-        # If still nothing and in frequency decrease mode, try edge detection
-        if frequency_decrease_mode:
-            edges = self.find_edges_simple(data)
-            if len(edges) >= 1:
-                return edges
             
         return np.array([])
         
@@ -1893,30 +1866,40 @@ class MainWindow(QtWidgets.QMainWindow):
             # Get enough data for trigger analysis - not the entire time scale!
             # We need enough data to find triggers and extract the requested periods
             if self.trigger_system.detected_period is not None:
-                # Get about 3-5 periods worth of data for analysis (reduced from 10)
-                # This prevents requesting too much data for low frequencies
-                analysis_samples = int(5 * self.trigger_system.detected_period)
-                
-                # Special handling for different frequency ranges
-                if self.trigger_system.detected_period > self.sample_rate // 2:  # Period > 0.5 seconds (< 2Hz)
+                # Get more periods worth of data for analysis - increased for high frequencies
+                # For high frequencies, we need more data for reliable trigger detection
+                if self.trigger_system.detected_period < 1000:  # High freq (>75Hz at 75kHz sample rate)
+                    # For high frequencies, use at least 15 periods of data for better reliability
+                    analysis_samples = int(15 * self.trigger_system.detected_period)
+                    # But cap at reasonable size
+                    analysis_samples = min(analysis_samples, int(0.5 * self.sample_rate))  # Max 0.5 seconds
+                    analysis_samples = max(analysis_samples, 2000)  # Minimum 2000 samples for high freq
+                elif self.trigger_system.detected_period < 5000:  # Medium freq (15-75Hz)
+                    # For medium frequencies, use 10 periods 
+                    analysis_samples = int(10 * self.trigger_system.detected_period)
+                    analysis_samples = min(analysis_samples, int(1.0 * self.sample_rate))  # Max 1 second
+                    analysis_samples = max(analysis_samples, 1500)  # Minimum 1500 samples
+                elif self.trigger_system.detected_period > self.sample_rate // 2:  # Period > 0.5 seconds (< 2Hz)
                     # For very low frequencies, use a fixed analysis window
                     analysis_samples = min(int(3 * self.sample_rate), self.total_samples_received)  # Max 3 seconds
                 elif self.trigger_system.detected_period > self.sample_rate // 10:  # Period > 0.1 seconds (< 10Hz)
                     # For low frequencies (3-10Hz), ensure we get enough data
-                    analysis_samples = max(analysis_samples, int(1.5 * self.sample_rate))  # At least 1.5 seconds
+                    analysis_samples = max(int(5 * self.trigger_system.detected_period), int(1.5 * self.sample_rate))  # At least 1.5 seconds
                     analysis_samples = min(analysis_samples, int(3 * self.sample_rate))  # Max 3 seconds
                 else:
-                    # For higher frequencies, cap at 2 seconds
-                    analysis_samples = min(analysis_samples, int(2 * self.sample_rate))
+                    # Default case - use 8 periods for better reliability
+                    analysis_samples = int(8 * self.trigger_system.detected_period)
+                    analysis_samples = min(analysis_samples, int(2 * self.sample_rate))  # Max 2 seconds
             else:
-                # Fallback: get more data to help with period detection
-                analysis_samples = int(1.0 * self.sample_rate)  # Increased from 0.5 seconds
+                # Fallback: get more data to help with period detection - increased for high freq support
+                analysis_samples = int(1.5 * self.sample_rate)  # Increased from 1.0 seconds
                 
             # Ensure we don't request more than available
             available = min(analysis_samples, self.total_samples_received)
             
-            # Need minimum data for meaningful trigger analysis
-            if available < 500:  # Increased from 100 for better trigger detection
+            # Need minimum data for meaningful trigger analysis - increased for high frequencies
+            min_required = max(1000, int(0.01 * self.sample_rate))  # At least 1000 samples or 10ms of data
+            if available < min_required:
                 return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.float32)
                 
             end_ptr = self.buffer_ptr
