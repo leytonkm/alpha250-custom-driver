@@ -118,7 +118,7 @@ class TriggerSystem:
     """Simple, reliable oscilloscope-like triggering system."""
     
     def __init__(self):
-        self.mode = 'auto'  # 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis'
+        self.mode = 'auto'  # 'auto', 'peak', 'zero_cross', 'edge', 'hysteresis', 'photodiode'
         self.level = 0.0
         self.edge = 'rising'  # 'rising', 'falling'
         self.auto_level = True
@@ -129,9 +129,18 @@ class TriggerSystem:
         self.period_history = []
         self.max_period_history = 5  # Reduced for faster response
         
+        # Template matching for consistent trigger selection
+        self.trigger_template = None
+        self.template_window = 50  # samples around trigger point
+        self.template_update_counter = 0
+        
         # Timeout tracking for automatic reset
         self.last_successful_trigger_time = None
         self.trigger_timeout_seconds = 3.0  # Reset if no triggers for 3 seconds
+        
+        # Signal preprocessing options for noisy photodiode signals
+        self.enable_filtering = False  # Enable simple moving average filtering
+        self.filter_window = 5  # Simple moving average window size
         
     def reset_trigger_system(self):
         """Reset trigger system - clear period history and detected period"""
@@ -270,35 +279,129 @@ class TriggerSystem:
         return np.array(triggers)
         
     def find_hysteresis_triggers(self, data):
-        """Hysteresis triggering - simple and stable with error handling"""
+        """Hysteresis triggering - enhanced for photodiode signals with error handling"""
         try:
             if len(data) < 10:
                 return np.array([])
                 
-            # Simple hysteresis: 5% of signal range
+            # Enhanced hysteresis for photodiode signals
             data_range = np.max(data) - np.min(data)
             if data_range == 0:
                 return np.array([])
                 
-            hysteresis = 0.05 * data_range
+            # More aggressive hysteresis for noisy photodiode signals
+            # Use 10% instead of 5% for better noise immunity
+            hysteresis = 0.10 * data_range
             high_thresh = self.level + hysteresis
             low_thresh = self.level - hysteresis
             
+            # Edge-aware hysteresis with optional derivative gating
             triggers = []
-            state = 'low' if data[0] < self.level else 'high'
-            
+
+            # Determine initial state based on actual signal level to avoid
+            # frame-to-frame alternation when the first sample starts in the
+            # opposite state.
+            state = 'high' if data[0] > high_thresh else 'low'
+
+            # Pre-compute derivative statistics for magnitude gating
+            derivative_all = np.diff(data)
+            deriv_threshold = np.std(derivative_all) * 0.5  # 0.5 σ – adapt to noise level
+
             for i in range(1, len(data)):
-                if state == 'low' and data[i] > high_thresh:
-                    triggers.append(i)
-                    state = 'high'
-                elif state == 'high' and data[i] < low_thresh:
-                    state = 'low'
-                    
+                deriv = derivative_all[i - 1]
+
+                if self.edge == 'rising':
+                    # Trigger on low→high crossing with sufficiently steep positive slope
+                    if state == 'low' and data[i] > high_thresh and deriv > deriv_threshold:
+                        triggers.append(i)
+                        state = 'high'
+                    elif state == 'high' and data[i] < low_thresh:
+                        state = 'low'
+
+                else:  # falling edge
+                    # Trigger on high→low crossing with sufficiently steep negative slope
+                    if state == 'high' and data[i] < low_thresh and deriv < -deriv_threshold:
+                        triggers.append(i)
+                        state = 'low'
+                    elif state == 'low' and data[i] > high_thresh:
+                        state = 'high'
+            
             return np.array(triggers)
             
         except Exception as e:
             print(f"Error in hysteresis detection: {e}")
             return np.array([])
+
+    def find_photodiode_triggers(self, data):
+        """Enhanced trigger detection specifically designed for photodiode signals"""
+        try:
+            if len(data) < 20:
+                return np.array([])
+            
+            # Step 1: Baseline tracking and removal
+            baseline_window = min(100, len(data) // 10)
+            if baseline_window > 0:
+                # Use rolling minimum as baseline estimate (photodiodes usually have sharp rises from baseline)
+                baseline = np.convolve(data, np.ones(baseline_window)/baseline_window, mode='same')
+                # Shift baseline down slightly to account for noise
+                baseline = baseline - 0.1 * np.std(data)
+                corrected_data = data - baseline
+            else:
+                corrected_data = data - np.mean(data)
+            
+            # Step 2: Simple noise filtering (moving average)
+            filter_window = max(3, min(10, len(data) // 100))
+            if filter_window > 1:
+                # Simple moving average filter
+                filtered_data = np.convolve(corrected_data, np.ones(filter_window)/filter_window, mode='same')
+            else:
+                filtered_data = corrected_data
+            
+            # Step 3: Enhanced peak detection for photodiode pulses
+            data_range = np.max(filtered_data) - np.min(filtered_data)
+            if data_range == 0:
+                return np.array([])
+            
+            # For photodiodes, look for sharp rises above baseline
+            # Use derivative to find sharp transitions
+            if len(filtered_data) > 2:
+                derivative = np.diff(filtered_data)
+                deriv_threshold = np.std(derivative) * 2  # 2 sigma threshold
+                
+                # Find points where derivative is high (sharp rise)
+                rise_candidates = np.where(derivative > deriv_threshold)[0] + 1
+                
+                if len(rise_candidates) > 0:
+                    # Filter by amplitude - must be significantly above baseline
+                    amplitude_threshold = np.min(filtered_data) + 0.3 * data_range
+                    valid_triggers = []
+                    
+                    for candidate in rise_candidates:
+                        if candidate < len(filtered_data) and filtered_data[candidate] > amplitude_threshold:
+                            valid_triggers.append(candidate)
+                    
+                    return np.array(valid_triggers)
+            
+            # Fallback to enhanced hysteresis if derivative method fails
+            return self.find_hysteresis_triggers(data)
+            
+        except Exception as e:
+            print(f"Error in photodiode trigger detection: {e}")
+            return self.find_hysteresis_triggers(data)  # Fallback to hysteresis
+        
+    def update_auto_level(self, data):
+        """Enhanced auto level for photodiode signals - tracks baseline better"""
+        if self.auto_level and len(data) > 0:
+            # For photodiode signals, use a more sophisticated auto-level
+            # that tracks the baseline rather than just the midpoint
+            
+            # Use percentiles to be robust against outliers
+            data_min = np.percentile(data, 5)   # 5th percentile as baseline
+            data_max = np.percentile(data, 95)  # 95th percentile as peak
+            
+            # Set trigger level at 30% above baseline instead of midpoint
+            # This works better for asymmetric photodiode pulses
+            self.level = data_min + 0.3 * (data_max - data_min)
         
     def detect_period_simple(self, data):
         """Simple period detection using autocorrelation with error handling"""
@@ -387,13 +490,25 @@ class TriggerSystem:
             # Validate new period against existing history
             if len(self.period_history) > 0:
                 median_period = np.median(self.period_history)
-                # More tolerant change detection - increased threshold for high frequencies
-                # Use 50% threshold to handle frequency increases better (e.g., 500Hz to 750Hz = 33% change)
+                # More conservative period change detection to prevent drift
                 period_change_ratio = abs(new_period - median_period) / median_period
-                if period_change_ratio > 0.5:  # Increased from 0.2 to 0.5 for better high-freq support
-                    print(f"Significant period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
-                    self.period_history = []
-            
+                if period_change_ratio > 0.3:  # Tightened from 0.5 to 0.3
+                    # Only reset if we see multiple large changes in a row
+                    if not hasattr(self, 'period_change_count'):
+                        self.period_change_count = 0
+                    self.period_change_count += 1
+                    
+                    if self.period_change_count >= 3:  # Require 3 consecutive large changes
+                        print(f"Consistent period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
+                        self.period_history = []
+                        self.period_change_count = 0
+                        self.trigger_template = None  # Reset template too
+                    else:
+                        print(f"Period change {self.period_change_count}/3: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%})")
+                        return  # Don't add this period to history yet
+                else:
+                    self.period_change_count = 0  # Reset counter on stable periods
+             
             self.period_history.append(new_period)
             if len(self.period_history) > self.max_period_history:
                 self.period_history.pop(0)
@@ -412,17 +527,22 @@ class TriggerSystem:
             start_time = time.time()
             max_processing_time = 0.1  # 100ms max processing time
             
+            # Apply signal preprocessing for noisy photodiode signals
+            processed_data = self.preprocess_signal(data)
+            
             # Get triggers based on mode
             if self.mode == 'auto':
-                triggers = self._auto_trigger_simple(data)
+                triggers = self._auto_trigger_simple(processed_data)
             elif self.mode == 'peak':
-                triggers = self.find_peaks_simple(data)
+                triggers = self.find_peaks_simple(processed_data)
             elif self.mode == 'zero_cross':
-                triggers = self.find_zero_crossings_simple(data)
+                triggers = self.find_zero_crossings_simple(processed_data)
             elif self.mode == 'edge':
-                triggers = self.find_edges_simple(data)
+                triggers = self.find_edges_simple(processed_data)
             elif self.mode == 'hysteresis':
-                triggers = self.find_hysteresis_triggers(data)
+                triggers = self.find_hysteresis_triggers(processed_data)
+            elif self.mode == 'photodiode':
+                triggers = self.find_photodiode_triggers(processed_data)
             else:
                 triggers = np.array([])
             
@@ -442,22 +562,55 @@ class TriggerSystem:
                 
             # Adaptive holdoff based on detected period
             if len(triggers) > 1:
-                # Use period-based holdoff if available
+                # Period-based hold-off: default to 80 % of detected period.
+                # This locks the window to the first qualifying edge each cycle
+                # and prevents the view from jumping to secondary peaks.
                 if self.detected_period is not None:
-                    # Improved holdoff for all frequencies
-                    if self.detected_period > 20000:  # > 0.2 seconds (< 5Hz)
-                        min_distance = max(20, self.detected_period // 10)  # 1/10 of period for low freq
-                    elif self.detected_period < 1000:  # High frequencies (>75Hz at 75kHz)
-                        min_distance = max(5, self.detected_period // 6)  # 1/6 of period for high freq
-                    else:
-                        min_distance = max(8, self.detected_period // 8)  # 1/8 of period for medium freq
+                    # Use 95 % of detected period so we treat the whole cycle as one cluster
+                    min_distance = int(0.95 * self.detected_period)
+                    # Ensure a sensible lower bound so very high-freq signals still work
+                    min_distance = max(min_distance, 5)
                 else:
-                    min_distance = 15  # Reduced fixed minimum distance as fallback
+                    # Fallback when period not known yet – pick a conservative constant
+                    min_distance = 50
+
+                # Peak-Anchoring: Stably select the trigger leading to the highest peak in each cycle.
+                filtered_triggers = []
+                i = 0
+                while i < len(triggers):
+                    # 1. Group candidate triggers into clusters based on the detected period
+                    cluster_start_idx = i
+                    cluster_end_idx = i
+                    while (cluster_end_idx + 1 < len(triggers) and
+                           triggers[cluster_end_idx + 1] - triggers[cluster_start_idx] < min_distance):
+                        cluster_end_idx += 1
                     
-                filtered_triggers = [triggers[0]]
-                for trigger in triggers[1:]:
-                    if trigger - filtered_triggers[-1] >= min_distance:
-                        filtered_triggers.append(trigger)
+                    current_cluster = triggers[cluster_start_idx : cluster_end_idx + 1]
+
+                    if len(current_cluster) > 0:
+                        # 2. Find the highest peak associated with this trigger cluster
+                        start_search = current_cluster[0]
+                        end_search = min(start_search + min_distance, len(processed_data))
+                        
+                        # Find index of max value within this window slice, offsetting back to full data coordinates
+                        local_max_idx = start_search + np.argmax(processed_data[start_search:end_search])
+
+                        # 3. Select the trigger from the cluster that is closest to (and before) this peak
+                        best_trigger = current_cluster[0]
+                        min_dist_to_peak = np.inf
+                        for t in current_cluster:
+                            # Ensure trigger is on the leading edge of the peak
+                            if t <= local_max_idx:
+                                dist = local_max_idx - t
+                                if dist < min_dist_to_peak:
+                                    min_dist_to_peak = dist
+                                    best_trigger = t
+
+                        filtered_triggers.append(best_trigger)
+
+                    # 4. Move to the next cluster
+                    i = cluster_end_idx + 1
+
                 triggers = np.array(filtered_triggers)
                 
             # Update period estimate
@@ -495,7 +648,7 @@ class TriggerSystem:
             return np.array([])  # Return empty array on any error
         
     def _auto_trigger_simple(self, data):
-        """Simple auto trigger - try only 3 methods"""
+        """Enhanced auto trigger - tries multiple methods including photodiode-specific detection"""
         # For low frequencies (detected period > 0.2 seconds), try hysteresis first
         if self.detected_period is not None and self.detected_period > 20000:  # > 0.2 seconds at 100kHz (< 5Hz)
             # Try hysteresis first for low frequencies (including 3-5Hz range)
@@ -503,7 +656,12 @@ class TriggerSystem:
             if len(hysteresis) >= 1:
                 return hysteresis
         
-        # Try peaks first 
+        # Try photodiode-specific detection first for irregular/noisy signals
+        photodiode_triggers = self.find_photodiode_triggers(data)
+        if len(photodiode_triggers) >= 2:
+            return photodiode_triggers
+        
+        # Try peaks detection
         peaks = self.find_peaks_simple(data)
         if len(peaks) >= 2:
             return peaks
@@ -513,7 +671,7 @@ class TriggerSystem:
         if len(crossings) >= 2:
             return crossings
             
-        # Try hysteresis as fallback
+        # Try enhanced hysteresis as fallback
         hysteresis = self.find_hysteresis_triggers(data)
         if len(hysteresis) >= 1:
             return hysteresis
@@ -572,6 +730,100 @@ class TriggerSystem:
             'auto_level': self.auto_level,
             'periods_to_display': self.periods_to_display
         }
+
+    def preprocess_signal(self, data):
+        """Apply signal preprocessing for noisy photodiode signals"""
+        if not self.enable_filtering or len(data) < self.filter_window:
+            return data
+            
+        try:
+            # Simple moving average filter for noise reduction
+            filtered = np.convolve(data, np.ones(self.filter_window)/self.filter_window, mode='same')
+            return filtered.astype(np.float32)
+        except Exception as e:
+            print(f"Error in signal preprocessing: {e}")
+            return data
+
+    def _select_best_trigger_with_template(self, candidate_triggers, data):
+        """Select trigger using template matching for maximum consistency"""
+        if len(candidate_triggers) == 1:
+            return candidate_triggers[0]
+            
+        # If no template yet, pick the steepest and create template
+        if self.trigger_template is None:
+            data_deriv = np.diff(data)
+            best_idx = candidate_triggers[0]
+            best_slope = -np.inf
+            
+            for t in candidate_triggers:
+                raw_slope = data_deriv[t - 1] if 0 < t < len(data_deriv) else data_deriv[-1]
+                slope = raw_slope if self.edge == 'rising' else -raw_slope
+                if slope > best_slope:
+                    best_slope = slope
+                    best_idx = t
+            
+            # Create template around this trigger
+            self._update_template(best_idx, data)
+            return best_idx
+        
+        # Use template matching to find most similar trigger
+        best_idx = candidate_triggers[0]
+        best_correlation = -1
+        
+        for t in candidate_triggers:
+            correlation = self._calculate_template_correlation(t, data)
+            if correlation > best_correlation:
+                best_correlation = correlation
+                best_idx = t
+        
+        # Occasionally update template with best match
+        self.template_update_counter += 1
+        if self.template_update_counter >= 10:  # Update every 10th trigger
+            self._update_template(best_idx, data)
+            self.template_update_counter = 0
+        
+        return best_idx
+    
+    def _update_template(self, trigger_idx, data):
+        """Update trigger template around the given trigger point"""
+        try:
+            start = max(0, trigger_idx - self.template_window // 2)
+            end = min(len(data), trigger_idx + self.template_window // 2)
+            
+            if end - start >= self.template_window // 2:  # Ensure minimum template size
+                template = data[start:end].copy()
+                # Normalize template
+                template = template - np.mean(template)
+                if np.std(template) > 0:
+                    template = template / np.std(template)
+                    self.trigger_template = template
+        except Exception as e:
+            print(f"Error updating template: {e}")
+    
+    def _calculate_template_correlation(self, trigger_idx, data):
+        """Calculate correlation between template and data around trigger point"""
+        try:
+            if self.trigger_template is None:
+                return 0
+                
+            start = max(0, trigger_idx - self.template_window // 2)
+            end = min(len(data), trigger_idx + self.template_window // 2)
+            
+            if end - start < len(self.trigger_template):
+                return 0
+                
+            window = data[start:start + len(self.trigger_template)]
+            # Normalize window
+            window = window - np.mean(window)
+            if np.std(window) > 0:
+                window = window / np.std(window)
+                # Calculate correlation
+                correlation = np.corrcoef(self.trigger_template, window)[0, 1]
+                return correlation if not np.isnan(correlation) else 0
+            return 0
+        except Exception as e:
+            print(f"Error calculating correlation: {e}")
+            return 0
 
 # --- Live Window Worker (infinite rolling oscilloscope) ---
 
@@ -1092,7 +1344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         trigger_mode_layout = QtWidgets.QHBoxLayout()
         trigger_mode_layout.addWidget(QtWidgets.QLabel("Mode:"))
         self.trigger_mode_combo = QtWidgets.QComboBox()
-        self.trigger_mode_combo.addItems(['Auto', 'Peak', 'Zero Cross', 'Edge', 'Hysteresis'])
+        self.trigger_mode_combo.addItems(['Auto', 'Peak', 'Zero Cross', 'Edge', 'Hysteresis', 'Photodiode'])
         self.trigger_mode_combo.setCurrentText('Auto')
         trigger_mode_layout.addWidget(self.trigger_mode_combo)
         trigger_layout.addLayout(trigger_mode_layout)
@@ -1174,6 +1426,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; }")
         trigger_layout.addWidget(self.trigger_status_label)
+        
+        # Signal preprocessing controls for noisy photodiode signals
+        preprocessing_layout = QtWidgets.QHBoxLayout()
+        self.enable_filtering_checkbox = QtWidgets.QCheckBox("Noise Filter")
+        self.enable_filtering_checkbox.setToolTip("Enable simple moving average filter for noisy photodiode signals")
+        preprocessing_layout.addWidget(self.enable_filtering_checkbox)
+        
+        self.filter_window_spinbox = QtWidgets.QSpinBox()
+        self.filter_window_spinbox.setRange(3, 20)
+        self.filter_window_spinbox.setValue(5)
+        self.filter_window_spinbox.setToolTip("Filter window size (higher = more smoothing)")
+        self.filter_window_spinbox.setEnabled(False)  # Initially disabled
+        preprocessing_layout.addWidget(QtWidgets.QLabel("Size:"))
+        preprocessing_layout.addWidget(self.filter_window_spinbox)
+        
+        trigger_layout.addLayout(preprocessing_layout)
         
         trigger_group_box.setLayout(trigger_layout)
 
@@ -1304,6 +1572,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.range_button_group.buttonClicked.connect(self.on_adc_range_button_clicked)
         self.autoscale_button.clicked.connect(self.on_autoscale_voltage)
 
+        # Connect signal preprocessing controls
+        self.enable_filtering_checkbox.toggled.connect(self.on_filtering_enabled_changed)
+        self.filter_window_spinbox.valueChanged.connect(self.on_filter_window_changed)
+
         # initialise max-duration label
         QtCore.QTimer.singleShot(0, self.update_max_duration)
         
@@ -1429,7 +1701,8 @@ class MainWindow(QtWidgets.QMainWindow):
             'Peak': 'peak', 
             'Zero Cross': 'zero_cross',
             'Edge': 'edge',
-            'Hysteresis': 'hysteresis'
+            'Hysteresis': 'hysteresis',
+            'Photodiode': 'photodiode'
         }
         self.trigger_system.set_trigger_mode(mode_map[mode_text])
         
@@ -2091,6 +2364,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_bar.showMessage(f"ADC range set to {range_text} ({voltage_range}) - Plot auto-scaled")
         except Exception as e:
             self.status_bar.showMessage(f"Failed to set ADC range: {e}")
+
+    def on_filtering_enabled_changed(self, enabled):
+        """Handle filtering enable/disable"""
+        self.trigger_system.enable_filtering = enabled
+        if enabled:
+            self.filter_window_spinbox.setEnabled(True)
+        else:
+            self.filter_window_spinbox.setEnabled(False)
+
+    def on_filter_window_changed(self, value):
+        """Handle filtering window size change"""
+        self.trigger_system.filter_window = value
+        if self.trigger_system.enable_filtering:
+            self.filter_window_spinbox.setValue(value)
 
 def main():
     """Main function to run the application."""

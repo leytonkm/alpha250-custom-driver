@@ -150,7 +150,7 @@ drivers:
   - boards/alpha250/drivers/gpio-expander.hpp
   - boards/alpha250/drivers/temperature-sensor.hpp
   - boards/alpha250/drivers/power-monitor.hpp
-  - boards/alpha250/drivers/ad9747.hpp       # DAC unchanged
+  - boards/alpha250/drivers/ad9747.hpp       
   - boards/alpha250/drivers/precision-dac.hpp
   - boards/alpha250/drivers/spi-config.hpp
   # Application drivers
