@@ -128,7 +128,7 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
 ####################################
-# DMA Infrastructure (following adc-dac-dma example exactly)
+# DMA Infrastructure 
 ####################################
 
 # Configure Zynq Processing System for DMA
@@ -172,7 +172,6 @@ connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M02_AXI] [get_bd_intf_pin
 
 ####################################
 # ADC Streaming Pipeline with CIC Decimation
-# Following phase-noise-analyzer pattern exactly
 ####################################
 
 # ADC channel multiplexer
@@ -259,7 +258,7 @@ cell koheron:user:tlast_gen:1.0 tlast_gen_0 {
 }
 
 ####################################
-# AXI DMA (S2MM only - no MM2S needed)
+# AXI DMA (S2MM only - no MM2S needed) -- i think this is good for ALPHA250
 ####################################
 
 cell xilinx.com:ip:axi_dma:7.1 axi_dma_0 {

@@ -77,10 +77,45 @@ This project showcases a complete system built using Koheron FPGA instruments, k
 - [Koheron-SDK GitHub](https://github.com/Koheron/koheron-sdk)
 - [ALPHA15 User Guide](https://www.koheron.com/support/user-guides/alpha15/)
 - [ALPHA15 Data Sheet (PDF)](https://assets.koheron.com/datasheets/koheron_alpha15-18-bit-15-msps-acquisition-board.pdf)
-- [ALPHA15 User Guide](https://www.koheron.com/support/user-guides/alpha250/)
-- [ALPHA15 Data Sheet (PDF)](https://assets.koheron.com/datasheets/koheron_alpha250-signal-acquisition-generation.pdf)
+- [ALPHA250 User Guide](https://www.koheron.com/support/user-guides/alpha250/)
+- [ALPHA250 Data Sheet (PDF)](https://assets.koheron.com/datasheets/koheron_alpha250-signal-acquisition-generation.pdf)
 
-## Simple Setup:
+## Setup:
 
 I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using this source code.
 
+
+## Data Pipeline & Performance (ALPHA15):
+
+
+### Data Pipeline:
+- **ADC:** LTC2387, 18-bit, 15 MHz, 8 Vpp input (16-bit, 250 MHz for ALPHA250)
+- **FPGA:** CIC filter (programmable 100–5000× decimation), followed by FIR filter (2× decimation)
+- **Output Rate:** 1.5 kHz – 75 kHz (configurable)
+- **DMA System:** 16 MB circular buffer, 512 descriptors, 1024 samples/descriptor
+- **Host Interface:** Ethernet streaming to Python/C++ drivers and application
+
+---
+
+### Performance:
+
+| Stage         | Specification                          | Metric / Result               |
+|---------------|----------------------------------------|------------------------------|
+| **ADC**       | LTC2387 18-bit, 15 MHz                 | 122.6 dB SNR, 0.003 mV noise |
+| **CIC Filter**| 100–5000× programmable decimation      | 0.0 ppm frequency accuracy   |
+| **FIR Filter**| 2× fixed decimation, anti-aliasing     | Passband flattening, preserves SNR                             |
+| **DMA**       | 16 MB buffer, 512 descriptors          | 99.8% utilization, 0 errors  |
+| **Transfer**  | Ethernet, sustained                    | 2.44 MB/s                    |
+| **Host**      | Python/C++ processing                  | 4.2% CPU overhead            |
+> All performance metrics are gathered from [`alpha15-laser-control/performance.py`](./alpha15-laser-control/performance.py).
+
+### Design Rationale:
+
+
+**Decimation (CIC + FIR)**: Full-rate ADC sampling generates far more data than is useful for typical spectroscopy and control tasks, overwhelming storage and bandwidth while adding unnecessary noise and overhead. On-FPGA decimation reduces the data rate to what the application actually needs, while preserving all relevant signal content and SNR.
+
+**FIR Filter**: The FIR stage corrects passband droop from the CIC filter and provides final anti-aliasing.  
+
+**Circular Buffer DMA**: A large, circular DMA buffer with scatter-gather support ensures continuous, real-time streaming without data loss, even during variable network or CPU loads.
+
+**Configurable Output Rate**: The output rate is easily adjustable in hardware to match different application requirements, from high-resolution capture to minimal bandwidth modes.

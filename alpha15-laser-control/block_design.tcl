@@ -129,7 +129,7 @@ cell xilinx.com:ip:c_counter_binary:12.0 cycle_counter {
 connect_pins [sts_pin cycle_count] cycle_counter/Q
 
 ####################################
-# DMA Infrastructure (following adc-dac-dma example exactly)
+# DMA Infrastructure
 ####################################
 
 # Configure Zynq Processing System for DMA
@@ -173,7 +173,6 @@ connect_bd_intf_net [get_bd_intf_pins dma_interconnect/M02_AXI] [get_bd_intf_pin
 
 ####################################
 # ADC Streaming Pipeline with CIC Decimation
-# Following phase-noise-analyzer pattern exactly
 ####################################
 
 # ADC Control Connections (CRITICAL - these were missing!)
@@ -252,7 +251,7 @@ cell pavel-demin:user:axis_variable:1.0 cic_rate_control {
 # Explicitly connect AXIS config interface between rate control and CIC (Vivado 2017.2 expects connect_bd_intf_net)
 connect_bd_intf_net [get_bd_intf_pins cic_rate_control/M_AXIS] [get_bd_intf_pins cic_decimator/S_AXIS_CONFIG]
 
-# Add FIR filter for CIC compensation (CRITICAL - was missing!)
+# Add FIR filter for CIC compensation 
 set fir_coeffs [exec $python $project_path/fir.py $n_stages $dec_rate_min $diff_delay print]
 
 cell xilinx.com:ip:fir_compiler:7.2 fir {
