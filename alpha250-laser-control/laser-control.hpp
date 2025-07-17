@@ -167,8 +167,8 @@ class CurrentRamp
     }
     
     void set_ramp_frequency(double frequency) {
-        if (frequency < 0.001 || frequency > 1000.0) {
-            ctx.log<ERROR>("Invalid frequency: %.3f Hz (must be 0.001-1000 Hz)", frequency);
+        if (frequency < 0.001 || frequency > 1000000.0) {
+            ctx.log<ERROR>("Invalid frequency: %.3f Hz (must be 0.001-1000000 Hz)", frequency);
             return;
         }
         
@@ -179,6 +179,12 @@ class CurrentRamp
         // Phase increment = (desired_freq * 2^32) / sampling_freq
         double phase_inc_factor = (1ULL << 32) / fs_adc;
         uint32_t phase_increment = static_cast<uint32_t>(frequency * phase_inc_factor);
+        
+        // Safety check for phase increment overflow (should not exceed 2^31 - 1)
+        if (phase_increment > 0x7FFFFFFF) {
+            ctx.log<ERROR>("Frequency too high: %.3f Hz results in phase increment overflow", frequency);
+            return;
+        }
         
         ctl.write<reg::ramp_freq_incr>(phase_increment);
         

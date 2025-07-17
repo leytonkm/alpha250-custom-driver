@@ -225,7 +225,7 @@ class VoltageControlApp {
 
         this.setFrequencyBtn.addEventListener('click', () => {
             const frequency = parseFloat(this.frequencyInput.value);
-            if (!isNaN(frequency) && frequency >= 0.1 && frequency <= 1000) {
+            if (!isNaN(frequency) && frequency >= 0.1 && frequency <= 1000000) {
                 const rampWasRunning = this.rampEnableToggle.checked;
                 
                 // Stop ramp if running
@@ -243,7 +243,7 @@ class VoltageControlApp {
                     this.voltageControl.startRamp();
                 }
             } else {
-                alert('Please enter a valid frequency between 0.1 and 1000 Hz');
+                alert('Please enter a valid frequency between 0.1 and 1000000 Hz');
             }
         });
 

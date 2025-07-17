@@ -11,7 +11,7 @@ matplotlib.use('TKAgg')
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
-host = os.getenv('HOST', '192.168.1.42')
+host = os.getenv('HOST', '192.168.1.20')
 client = connect(host, 'adc-dac-bram', restart=True)
 driver = AdcDacBram(client)
 

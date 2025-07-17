@@ -1,8 +1,9 @@
-/// Laser-Control Driver
+/// Laser-Control Driver for the Alpha15 FPGA instrument
 ///
 /// Driver for controlling laser current ramp (temperature and laser power)
 /// Hardware-based precise timing using DDS phase accumulator
 /// Added: DMA-based high-rate ADC streaming for monitoring ramp response
+/// See block_design.tcl for vivado configuration
 /// (c) Koheron
 
 #ifndef __DRIVERS_CURRENTRAMP_HPP__
@@ -17,7 +18,7 @@
 #include <cmath>
 #include <vector>
 
-// AXI DMA Registers (following adc-dac-dma example)
+// AXI DMA Registers
 namespace Dma_regs {
     constexpr uint32_t s2mm_dmacr = 0x30;    // S2MM DMA Control register
     constexpr uint32_t s2mm_dmasr = 0x34;    // S2MM DMA Status register
@@ -45,8 +46,8 @@ namespace Sclr_regs {
 
 // DMA streaming parameters
 #define LASER_CONTROL_N_PTS 1024
-constexpr uint32_t n_pts = LASER_CONTROL_N_PTS;      // Number of 32-bit samples per descriptor (≈20 ms @ 50 kS/s)
-constexpr uint32_t n_desc = 512; // Number of descriptors (32 KiB descriptor list)
+constexpr uint32_t n_pts = LASER_CONTROL_N_PTS;      // Number of 32-bit samples per descriptor
+constexpr uint32_t n_desc = 512; // Number of descriptors - could increase this?
 
 class CurrentRamp
 {
@@ -78,13 +79,13 @@ class CurrentRamp
         // Initialize hardware ramp disabled
         ctl.write<reg::ramp_enable>(0);
         
-        // Initialize DMA system (following adc-dac-dma example)
+        // Initialize DMA system 
         init_dma_system();
         
-        // Initialize CIC decimation rate to default (240MHz → 2.4MHz)
+        // Initialize CIC decimation rate to default
         set_decimation_rate(100);
 
-        // Set ADC to 8Vpp range (don't recalibrate clock delay)
+        // Set ADC to 8Vpp range 
         ltc2387.range_select(0, 1); // Set channel 0 to 8Vpp
         ltc2387.range_select(1, 1); // Set channel 1 to 8Vpp
         
@@ -101,7 +102,7 @@ class CurrentRamp
     }
 
     // === DC TEMPERATURE CONTROL FUNCTIONS ===
-    // Uses precision DAC channel 0 for DC temperature control
+    // Uses precision DAC channel 0 for DC temperature control (150 mV works well for 60 degrees celsius on our setup)
     
     void set_temperature_dc_voltage(float voltage) {
         if (voltage < 0.0f || voltage > 2.5f) {
@@ -139,7 +140,7 @@ class CurrentRamp
     }
 
     // === LASER CURRENT RAMP CONTROL FUNCTIONS ===
-    // Uses hardware ramp generator connected to precision DAC channel 2
+    // Uses hardware ramp generator connected to precision DAC channel 2 (voltage settings depend on the amplifier gain) targeting ~3.8 V w/ 250 mV amplitude
     
     void set_ramp_offset(float offset) {
         if (offset < 0.0f || offset > 2.5f) {
@@ -170,8 +171,8 @@ class CurrentRamp
     }
     
     void set_ramp_frequency(double frequency) {
-        if (frequency < 0.001 || frequency > 1000.0) {
-            ctx.log<ERROR>("Invalid frequency: %.3f Hz (must be 0.001-1000 Hz)", frequency);
+        if (frequency < 0.001 || frequency > 1000000.0) {
+            ctx.log<ERROR>("Invalid frequency: %.3f Hz (must be 0.001-1000000 Hz)", frequency);
             return;
         }
         
@@ -180,10 +181,16 @@ class CurrentRamp
         
         // Calculate phase increment for DDS
         // Phase increment = (desired_freq * 2^32) / DDS_clock_freq
-        // NOTE: DDS runs at adc_clk (240 MHz), NOT ADC sampling frequency (15 MHz)
-        constexpr double dds_clock_freq = 240e6;  // 240 MHz from config adc_clk parameter
+        // NOTE: DDS runs at adc_clk (240 MHz), which is different from the ADC sampling frequency (15 MHz)
+        constexpr double dds_clock_freq = 240e6;  // 240 MHz from config adc_clk parameter (verify with config.yml)
         double phase_inc_factor = (1ULL << 32) / dds_clock_freq;
         uint32_t phase_increment = static_cast<uint32_t>(frequency * phase_inc_factor);
+        
+        // Safety check for phase increment overflow (should not exceed 2^31 - 1)
+        if (phase_increment > 0x7FFFFFFF) {
+            ctx.log<ERROR>("Frequency too high: %.3f Hz results in phase increment overflow", frequency);
+            return;
+        }
         
         ctl.write<reg::ramp_freq_incr>(phase_increment);
         
@@ -641,7 +648,7 @@ class CurrentRamp
         // Get voltage range and apply scaling like working examples
         double vrange = adc_range_sel_ ? 8.192 : 2.048;  // 8Vpp or 2Vpp range
         constexpr double nmax = 262144.0; // 2^18 for 18-bit ADC
-        constexpr double cic_fir_compensation = 4096.0; // mathematically derived from working Alpha15 decimator example (2^12 scaling factor)
+        constexpr double cic_fir_compensation = 4096.0; // 2^12 scaling factor
         
         // Apply the same scaling as working decimator example
         double voltage = vrange * static_cast<double>(adc_signed) / nmax / cic_fir_compensation;
@@ -650,10 +657,9 @@ class CurrentRamp
     }
 
     // === ADC RANGE CONTROL ===
-    // range: 0 → 2 Vpp (default), 1 → 8 Vpp
+
     void set_adc_input_range(uint8_t range_sel) {
         adc_range_sel_ = (range_sel ? 1 : 0);
-        // Use LTC2387 driver helper to set range per channel (0: 2 Vpp, 1: 8 Vpp)
         ltc2387.range_select(0, adc_range_sel_);
         ltc2387.range_select(1, adc_range_sel_);
         adc_range_vpp_ = adc_range_sel_ ? 8.0f : 2.0f;
@@ -675,15 +681,14 @@ class CurrentRamp
     // === DATA RETRIEVAL FUNCTIONS ===
     
     // This is the new, robust data retrieval function.
-    // It intelligently reads the most recent samples from the DMA circular buffer.
+    // Reading most recent samples from the DMA circular buffer.
     std::vector<float> get_adc_stream_voltages(uint32_t num_samples) {
         if (!streaming_active) {
             ctx.log<WARNING>("DMA streaming is not active, returning empty vector.");
             return {};
         }
 
-        // We can't request more data than is available in the buffer history.
-        // We reserve one packet as a safety margin.
+        //  can't request more data than is available in the buffer history.
         if (num_samples > (n_desc - 1) * n_pts) {
             num_samples = (n_desc - 1) * n_pts;
             ctx.log<WARNING>("Requested samples exceeds buffer history, limiting to %u", num_samples);
@@ -694,8 +699,7 @@ class CurrentRamp
         uint32_t current_desc_idx = get_current_descriptor_index();
         
         // 2. Determine the most recent "safe" block of data to read.
-        // We go back two full descriptors from the current one to ensure we are reading
-        // from a region that is not actively being written to.
+        // We go back two full descriptors from the current one to ensure we are reading from a region that is not actively being written to.
         const uint32_t total_buffer_samples = n_desc * n_pts;
         uint32_t last_safe_desc_idx = (current_desc_idx + n_desc - 2) % n_desc;
         uint32_t end_sample_in_buffer = (last_safe_desc_idx + 1) * n_pts;
@@ -710,11 +714,11 @@ class CurrentRamp
         for (uint32_t i = 0; i < num_samples; i++) {
             uint32_t buffer_idx = (start_sample_in_buffer + i) % total_buffer_samples;
             
-            // Read 32-bit CIC+FIR output directly (no more 16-bit unpacking)
+            // Read 32-bit CIC+FIR output directly 
             uint32_t sample_byte_offset = buffer_idx * 4;
             int32_t adc_raw = static_cast<int32_t>(ram_s2mm.read_reg(sample_byte_offset));
             
-            // Apply corrected voltage scaling
+            // Scale voltage
             result[i] = adc_to_voltage(static_cast<uint32_t>(adc_raw));
         }
 
@@ -738,8 +742,8 @@ class CurrentRamp
     Memory<mem::sclr>& sclr;
     
     // Clock and timing
-    double fs_adc;  // ADC sampling frequency (Hz)
-    uint8_t adc_range_sel_ = 1; // 0=2Vpp,1=8Vpp (default to 8Vpp)
+    double fs_adc;  // ADC sampling frequency
+    uint8_t adc_range_sel_ = 1; // 0=2Vpp,1=8Vpp 
     float   adc_range_vpp_ = 8.0f;
     
     // DC control state
@@ -774,8 +778,6 @@ class CurrentRamp
     
     void set_descriptors() {
         for (uint32_t i = 0; i < n_desc; i++) {
-            // Corrected buffer allocation: each descriptor points to a region
-            // of size 4 * n_pts (since samples are now 4 bytes, not 2 bytes).
             // The buffer length for the DMA is also 4 * n_pts.
             set_descriptor_s2mm(i, mem::ram_s2mm_addr + i * 4 * n_pts, 4 * n_pts);
         }

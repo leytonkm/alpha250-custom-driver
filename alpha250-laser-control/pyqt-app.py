@@ -116,6 +116,11 @@ class TriggerSystem:
         self.period_history = []
         self.max_period_history = 5  # Reduced for faster response
         
+        # Template matching for consistent trigger selection
+        self.trigger_template = None
+        self.template_window = 50  # samples around trigger point
+        self.template_update_counter = 0
+        
         # Timeout tracking for automatic reset
         self.last_successful_trigger_time = None
         self.trigger_timeout_seconds = 3.0  # Reset if no triggers for 3 seconds
@@ -287,16 +292,29 @@ class TriggerSystem:
             high_thresh = self.level + hysteresis
             low_thresh = self.level - hysteresis
             
+            # Edge-aware hysteresis with derivative gating
             triggers = []
-            state = 'low' if data[0] < self.level else 'high'
+            state = 'high' if data[0] > high_thresh else 'low'
+            
+            derivative_all = np.diff(data)
+            deriv_threshold = np.std(derivative_all) * 0.5
             
             for i in range(1, len(data)):
-                if state == 'low' and data[i] > high_thresh:
-                    triggers.append(i)
-                    state = 'high'
-                elif state == 'high' and data[i] < low_thresh:
-                    state = 'low'
-                    
+                deriv = derivative_all[i - 1]
+
+                if self.edge == 'rising':
+                    if state == 'low' and data[i] > high_thresh and deriv > deriv_threshold:
+                        triggers.append(i)
+                        state = 'high'
+                    elif state == 'high' and data[i] < low_thresh:
+                        state = 'low'
+                else:
+                    if state == 'high' and data[i] < low_thresh and deriv < -deriv_threshold:
+                        triggers.append(i)
+                        state = 'low'
+                    elif state == 'low' and data[i] > high_thresh:
+                        state = 'high'
+            
             return np.array(triggers)
             
         except Exception as e:
@@ -390,11 +408,24 @@ class TriggerSystem:
             # Validate new period against existing history
             if len(self.period_history) > 0:
                 median_period = np.median(self.period_history)
-                # More aggressive change detection for frequency switches (>20% change)
+                # More conservative period change detection to prevent drift
                 period_change_ratio = abs(new_period - median_period) / median_period
-                if period_change_ratio > 0.2:  # 20% change threshold
-                    print(f"Significant period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
-                    self.period_history = []
+                if period_change_ratio > 0.3:  # Tightened from 0.5 to 0.3
+                    # Only reset if we see multiple large changes in a row
+                    if not hasattr(self, 'period_change_count'):
+                        self.period_change_count = 0
+                    self.period_change_count += 1
+                    
+                    if self.period_change_count >= 3:  # Require 3 consecutive large changes
+                        print(f"Consistent period change detected: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%}), resetting history")
+                        self.period_history = []
+                        self.period_change_count = 0
+                        self.trigger_template = None  # Reset template too
+                    else:
+                        print(f"Period change {self.period_change_count}/3: {median_period:.0f} -> {new_period:.0f} ({period_change_ratio:.1%})")
+                        return  # Don't add this period to history yet
+                else:
+                    self.period_change_count = 0  # Reset counter on stable periods
             
             self.period_history.append(new_period)
             if len(self.period_history) > self.max_period_history:
@@ -444,31 +475,51 @@ class TriggerSystem:
                 
             # Adaptive holdoff based on detected period
             if len(triggers) > 1:
-                # Use period-based holdoff if available
+                # Period-based hold-off: default to 80 % of detected period.
                 if self.detected_period is not None:
-                    # More conservative holdoff for 3-5Hz range
-                    if self.detected_period > 20000:  # > 0.2 seconds (< 5Hz)
-                        min_distance = max(20, self.detected_period // 10)  # 1/10 of period for low freq
-                    else:
-                        min_distance = max(10, self.detected_period // 8)  # 1/8 of period for higher freq
+                    min_distance = int(0.95 * self.detected_period)
+                    min_distance = max(min_distance, 5)
                 else:
-                    min_distance = 20  # Fixed minimum distance as fallback
+                    min_distance = 50
+                 
+                # Peak-Anchoring: Stably select the trigger leading to the highest peak in each cycle.
+                filtered_triggers = []
+                i = 0
+                while i < len(triggers):
+                    # 1. Group candidate triggers into clusters based on the detected period
+                    cluster_start_idx = i
+                    cluster_end_idx = i
+                    while (cluster_end_idx + 1 < len(triggers) and
+                           triggers[cluster_end_idx + 1] - triggers[cluster_start_idx] < min_distance):
+                        cluster_end_idx += 1
                     
-                filtered_triggers = [triggers[0]]
-                for trigger in triggers[1:]:
-                    if trigger - filtered_triggers[-1] >= min_distance:
-                        filtered_triggers.append(trigger)
+                    current_cluster = triggers[cluster_start_idx : cluster_end_idx + 1]
+
+                    if len(current_cluster) > 0:
+                        # 2. Find the highest peak associated with this trigger cluster
+                        start_search = current_cluster[0]
+                        end_search = min(start_search + min_distance, len(processed_data))
+                        
+                        # Find index of max value within this window slice, offsetting back to full data coordinates
+                        local_max_idx = start_search + np.argmax(processed_data[start_search:end_search])
+
+                        # 3. Select the trigger from the cluster that is closest to (and before) this peak
+                        best_trigger = current_cluster[0]
+                        min_dist_to_peak = np.inf
+                        for t in current_cluster:
+                            # Ensure trigger is on the leading edge of the peak
+                            if t <= local_max_idx:
+                                dist = local_max_idx - t
+                                if dist < min_dist_to_peak:
+                                    min_dist_to_peak = dist
+                                    best_trigger = t
+
+                        filtered_triggers.append(best_trigger)
+
+                    # 4. Move to the next cluster
+                    i = cluster_end_idx + 1
+
                 triggers = np.array(filtered_triggers)
-                
-            # Update period estimate
-            if len(triggers) >= 2:
-                periods = np.diff(triggers)
-                if len(periods) > 0:
-                    avg_period = np.median(periods)
-                    self.update_period_estimate(avg_period)
-                    # Update successful trigger time
-                    import time
-                    self.last_successful_trigger_time = time.time()
             elif len(triggers) == 0:
                 # Check for timeout and reset if needed
                 import time
@@ -1794,6 +1845,87 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_status_label.setText("Status: DMA Error")
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
         self.trigger_markers.setData([], [])
+
+    def _select_best_trigger_with_template(self, candidate_triggers, data):
+        """Select trigger using template matching for maximum consistency"""
+        if len(candidate_triggers) == 1:
+            return candidate_triggers[0]
+            
+        # If no template yet, pick the steepest and create template
+        if self.trigger_template is None:
+            data_deriv = np.diff(data)
+            best_idx = candidate_triggers[0]
+            best_slope = -np.inf
+            
+            for t in candidate_triggers:
+                raw_slope = data_deriv[t - 1] if 0 < t < len(data_deriv) else data_deriv[-1]
+                slope = raw_slope if self.edge == 'rising' else -raw_slope
+                if slope > best_slope:
+                    best_slope = slope
+                    best_idx = t
+            
+            # Create template around this trigger
+            self._update_template(best_idx, data)
+            return best_idx
+        
+        # Use template matching to find most similar trigger
+        best_idx = candidate_triggers[0]
+        best_correlation = -1
+        
+        for t in candidate_triggers:
+            correlation = self._calculate_template_correlation(t, data)
+            if correlation > best_correlation:
+                best_correlation = correlation
+                best_idx = t
+        
+        # Occasionally update template with best match
+        self.template_update_counter += 1
+        if self.template_update_counter >= 10:  # Update every 10th trigger
+            self._update_template(best_idx, data)
+            self.template_update_counter = 0
+        
+        return best_idx
+    
+    def _update_template(self, trigger_idx, data):
+        """Update trigger template around the given trigger point"""
+        try:
+            start = max(0, trigger_idx - self.template_window // 2)
+            end = min(len(data), trigger_idx + self.template_window // 2)
+            
+            if end - start >= self.template_window // 2:  # Ensure minimum template size
+                template = data[start:end].copy()
+                # Normalize template
+                template = template - np.mean(template)
+                if np.std(template) > 0:
+                    template = template / np.std(template)
+                    self.trigger_template = template
+        except Exception as e:
+            print(f"Error updating template: {e}")
+    
+    def _calculate_template_correlation(self, trigger_idx, data):
+        """Calculate correlation between template and data around trigger point"""
+        try:
+            if self.trigger_template is None:
+                return 0
+                
+            start = max(0, trigger_idx - self.template_window // 2)
+            end = min(len(data), trigger_idx + self.template_window // 2)
+            
+            if end - start < len(self.trigger_template):
+                return 0
+                
+            window = data[start:start + len(self.trigger_template)]
+            # Normalize window
+            window = window - np.mean(window)
+            if np.std(window) > 0:
+                window = window / np.std(window)
+                # Calculate correlation
+                correlation = np.corrcoef(self.trigger_template, window)[0, 1]
+                return correlation if not np.isnan(correlation) else 0
+            return 0
+        except Exception as e:
+            print(f"Error calculating correlation: {e}")
+            return 0
 
 def main():
     """Main function to run the application."""

@@ -40,7 +40,7 @@ def test_phase_shift(config):
     plt.show()
 
 if __name__ == "__main__":
-    host = os.getenv('HOST', '192.168.1.42')
+    host = os.getenv('HOST', '192.168.1.20')
     client = connect(host, 'adc-dac-bram', restart=True)
     driver = AdcDacBram(client)
 

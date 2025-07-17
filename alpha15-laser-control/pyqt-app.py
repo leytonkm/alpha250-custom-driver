@@ -2061,7 +2061,7 @@ class MainWindow(QtWidgets.QMainWindow):
         n_new = new_data.size
         if n_new == 0:
             return
-        # Update buffers (same as before)
+        # Update buffers 
         self.sample_clock += n_new
         new_times = (self.sample_clock / self.sample_rate) - (np.arange(n_new, 0, -1) / self.sample_rate)
         start_idx = self.buffer_ptr
