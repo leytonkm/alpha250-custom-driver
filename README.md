@@ -110,6 +110,12 @@ This project showcases a complete system built using Koheron FPGA instruments, k
 > comes with a comprehensive, open source, FPGA / Linux reference
 > design."*
 
+<p align="center">
+  <img src="assets/ALPHA15.jpg" alt="ALPHA15 Board" width="350"/>
+  <img src="assets/ALPHA250.jpg" alt="ALPHA250 Board" width="350"/>
+</p>
+
+
 ### Resources:
 
 - [Koheron-SDK GitHub](https://github.com/Koheron/koheron-sdk)
