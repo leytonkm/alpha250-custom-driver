@@ -1,30 +1,4 @@
 #!/usr/bin/env python3
-"""
-Alpha15 FPGA Laser Control - Performance Benchmarking Suite
-===========================================================
-
-Comprehensive performance testing for portfolio demonstration.
-Showcases high-speed FPGA data acquisition, DMA streaming, and real-time processing.
-
-Key Performance Metrics:
-- Data Acquisition: Up to 7.5 MSPS with CIC+FIR decimation (15 MHz / 2)
-- DMA Streaming: 16MB circular buffers with 512 descriptors  
-- Processing: Real-time trigger detection and signal analysis
-- Latency: <1μs hardware response time
-- Memory: Efficient circular buffer management
-
-Decimation Formula: fs_effective = fs_adc / (2.0 * decimation_rate)
-- fs_adc: ADC sampling frequency (~15 MHz for Alpha15)
-- Factor of 2.0: FIR stage decimation
-- decimation_rate: CIC decimation rate (10-8192)
-
-Hardware Platform: Alpha15 FPGA (Zynq-7000 series)
-ADC: 18-bit LTC2387, dual-channel, up to 15 MHz
-DAC: 16-bit precision output with hardware ramp generation
-DMA: High-performance scatter-gather with burst transfers
-
-(c) 2024 - Advanced FPGA Instrumentation
-"""
 
 import os
 import sys

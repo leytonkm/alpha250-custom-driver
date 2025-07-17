@@ -2,9 +2,47 @@
 
 ## Table of Contents:
 
+- [Introduction](#introduction)
+- [Live Demonstration & Results](#live-demonstration--results)
+- [Technical Highlights](#technical-highlights)
+    - [FPGA Hardware Design](#fpga-hardware-design)
+    - [C++ Driver](#c-driver)
+    - [PyQt and Web Applications](#pyqt-and-web-applications)
+    - [Testing & Validation Infrastructure](#testing--validation-infrastructure)
+- [Core Files & Modules](#core-files--modules)
+    - [Koheron ALPHA15 Instrument](#koheron-alpha15-instrument)
+    - [Koheron ALPHA250 Instrument](#koheron-alpha250-instrument)
+- [Koheron Instrument](#koheron-instrument)
+    - [Resources](#resources)
+- [Setup](#setup)
+- [Data Pipeline & Performance (ALPHA15)](#data-pipeline--performance-alpha15)
+    - [Data Pipeline](#data-pipeline)
+    - [Performance](#performance)
+    - [Design Rationale](#design-rationale)
+
 ## Introduction:
 
-This repository contains my work on creating a custom spectroscopy control system using FPGA devices from Koheron. During my project, I used both the ALPHA250 and ALPHA150 instruments. The latest version uses the ALPHA150 board, due to its higher RF ADC resolution, which is more practical for spectroscopy applications.
+This repository presents a **custom high-performance FPGA-based spectroscopy control and data acquisition system**, developed on the [Koheron ALPHA250 and ALPHA15](#koheron-instrument) platforms. The system integrates [custom FPGA modules](#fpga-hardware-design), [optimized C++ drivers](#c-driver), and [comprehensive Python and TypeScript applications](#pyqt-and-web-applications) to enable real-time, precision data acquisition, instrument control, and analysis for optical and spectroscopy research.  
+
+My goal with this project was to deliver a robust, fully integrated platform that allows for complete customization of inputs and outputs, remote access and control from any device, and seamless extension for advanced research or industrial use. 
+
+> The latest architecture uses the ALPHA15 board to leverage its 18-bit, low-noise ADCs and flexible signal processing chain. 
+
+
+## Live Demonstration & Results:
+
+To demonstrate the system’s capabilities, I performed a **complete cesium spectroscopy** experiment using only the ALPHA15 board, a Koheron amplifier, and a PID controller for temperature stabilization.  
+
+This experiment provides concrete validation that the full acquisition pipeline operates reliably in a lab environment. The FPGA hardware generates **precision voltage ramps**, **real-time trigger logic** consistently detects events, and the DMA and driver infrastructure sustain **high-speed data transfer**. Data is acquired and visualized live with zero missed triggers or dropped samples.  
+
+
+> Here is a view of the PyQt app with the trigger enabled:
+
+![Spectroscopy Graph Demo](assets/spec_graph.gif)
+
+> Here is a full video of the spectroscopy setup:
+
+(insert video here)  
 
 ## Technical Highlights:
 - ### FPGA Hardware Design:
@@ -45,11 +83,11 @@ This repository contains my work on creating a custom spectroscopy control syste
 
 ### **Koheron ALPHA15 Instrument**
 - [Complete ALPHA15 Instrument](/alpha15-laser-control)
-- [C++ Driver](/alpha15-laser-control/laser-control.hpp)
-- [Vivado Zynq Block Design (TCL)](/alpha15-laser-control/block_design.tcl)
-- [Config File](/alpha15-laser-control/config.yml)
-- [Live ADC PyQT App](/alpha15-laser-control/pyqt-app.py)
-- [Webapp](/alpha15-laser-control/web)
+    - [C++ Driver](/alpha15-laser-control/laser-control.hpp)
+    - [Vivado Zynq Block Design (TCL)](/alpha15-laser-control/block_design.tcl)
+    - [Config File](/alpha15-laser-control/config.yml)
+    - [PyQT App](/alpha15-laser-control/pyqt-app.py)
+    - [Web app](/alpha15-laser-control/web)
 
 ### **Koheron ALPHA250 Instrument**
 - [Complete ALPHA250 Instrument](/alpha250-laser-control)
@@ -112,10 +150,13 @@ I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using t
 ### Design Rationale:
 
 
-**Decimation (CIC + FIR)**: Full-rate ADC sampling generates far more data than is useful for typical spectroscopy and control tasks, overwhelming storage and bandwidth while adding unnecessary noise and overhead. On-FPGA decimation reduces the data rate to what the application actually needs, while preserving all relevant signal content and SNR.
+**Decimation (CIC + FIR)**: Full-rate ADC sampling generates more data than is useful for typical spectroscopy and control tasks, overwhelming storage and bandwidth while adding unnecessary noise and overhead. On-FPGA decimation reduces the data rate to what the application actually needs, while preserving all relevant signal content and SNR. This allows the use of program on a wider array of devices, and enables smoother streaming over wireless connections.
 
 **FIR Filter**: The FIR stage corrects passband droop from the CIC filter and provides final anti-aliasing.  
 
 **Circular Buffer DMA**: A large, circular DMA buffer with scatter-gather support ensures continuous, real-time streaming without data loss, even during variable network or CPU loads.
 
 **Configurable Output Rate**: The output rate is easily adjustable in hardware to match different application requirements, from high-resolution capture to minimal bandwidth modes.
+
+
+
