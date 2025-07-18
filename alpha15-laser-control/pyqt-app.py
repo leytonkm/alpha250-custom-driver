@@ -409,6 +409,16 @@ class TriggerSystem:
             if len(data) < 50:  # Reduced from 100 for better low-frequency support
                 return None
                 
+            # Check for data discontinuities that might indicate DMA restart
+            # Skip period detection if we detect large jumps that suggest buffer issues
+            if len(data) > 100:
+                data_diff = np.diff(data)
+                max_jump = np.max(np.abs(data_diff))
+                data_range = np.max(data) - np.min(data)
+                if data_range > 0 and max_jump > 0.5 * data_range:
+                    # Large jump detected - likely buffer discontinuity, skip period detection
+                    return None
+                
             # Timeout protection
             import time
             start_time = time.time()
@@ -2331,7 +2341,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_dma_error_occurred(self):
         """Handle DMA error notification"""
-        self.trigger_system.reset_trigger_system()
+        # Only reset trigger system if it has been stable for a while
+        # This prevents constant resets during normal DMA operation
+        import time
+        
+        # Track reset frequency to prevent excessive resets
+        current_time = time.time()
+        if not hasattr(self, '_last_dma_reset_time'):
+            self._last_dma_reset_time = 0
+        if not hasattr(self, '_dma_reset_count'):
+            self._dma_reset_count = 0
+        
+        # If we're resetting too frequently, just ignore this error
+        if current_time - self._last_dma_reset_time < 2.0:  # Less than 2 seconds since last reset
+            self._dma_reset_count += 1
+            if self._dma_reset_count > 3:  # More than 3 resets in 2 seconds
+                print("DMA error: Too many recent resets, ignoring")
+                return
+        else:
+            self._dma_reset_count = 0  # Reset counter after 2 seconds
+        
+        self._last_dma_reset_time = current_time
+        
+        # Check if trigger system has been working recently
+        if (self.trigger_system.last_successful_trigger_time is not None and 
+            time.time() - self.trigger_system.last_successful_trigger_time < 5.0):
+            # Trigger system was working recently, don't reset completely
+            # Just clear the template to allow re-learning but preserve period detection
+            self.trigger_system.trigger_template = None
+            self.trigger_system.template_update_counter = 0
+            print("DMA error: Partial trigger system reset (preserved period detection)")
+        else:
+            # Complete reset only if trigger system wasn't working anyway
+            self.trigger_system.reset_trigger_system()
+            print("DMA error: Complete trigger system reset")
+        
         self.trigger_status_label.setText("Status: DMA Error")
         self.trigger_status_label.setStyleSheet("QLabel { background-color: #FFB6C1; padding: 5px; }")
         self.trigger_markers.setData([], [])
