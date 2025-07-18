@@ -33,7 +33,7 @@ My goal with this project was to deliver a robust, fully integrated platform tha
 
 To demonstrate the system’s capabilities, I performed a **complete cesium spectroscopy** experiment using only the ALPHA15 board, a Koheron amplifier, and a PID controller for temperature stabilization.  
 
-This experiment provides concrete validation that the full acquisition pipeline operates reliably in a lab environment. The FPGA hardware generates **precision voltage ramps**, **real-time trigger logic** consistently detects events, and the DMA and driver infrastructure sustain **high-speed data transfer**. Data is acquired and visualized live with zero missed triggers or dropped samples.  
+This experiment provides validation that the full acquisition pipeline operates reliably in a lab environment. The FPGA hardware generates **precision voltage ramps**, **real-time trigger logic** consistently detects events, and the DMA and driver infrastructure sustain **high-speed data transfer**. Data is acquired and visualized live with zero missed triggers or dropped samples.  
 
 
 > Here is a view of the PyQt app with the trigger enabled:
@@ -42,7 +42,8 @@ This experiment provides concrete validation that the full acquisition pipeline 
 
 > Here is a full video of the spectroscopy setup:
 
-(insert video here)  
+![Spectroscopy Full Setup](assets/specset.gif)
+
 
 ## Technical Highlights:
 - ### FPGA Hardware Design:
@@ -124,10 +125,6 @@ This project showcases a complete system built using Koheron FPGA instruments, k
 - [ALPHA250 User Guide](https://www.koheron.com/support/user-guides/alpha250/)
 - [ALPHA250 Data Sheet (PDF)](https://assets.koheron.com/datasheets/koheron_alpha250-signal-acquisition-generation.pdf)
 
-## Setup:
-
-I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using this source code.
-
 
 ## Data Pipeline & Performance (ALPHA15):
 
@@ -164,5 +161,8 @@ I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using t
 
 **Configurable Output Rate**: The output rate is easily adjustable in hardware to match different application requirements, from high-resolution capture to minimal bandwidth modes.
 
+## Setup:
+
+I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using this source code.
 
 
