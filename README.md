@@ -183,6 +183,37 @@ This project showcases a complete system built using Koheron FPGA instruments, k
 
 ## Setup:
 
-I have provided a brief tutorial to set up an ALPHA250 or ALPHA15 device using this source code.
+This repository provides tools to build and run an instrument using a Koheron **ALPHA250** or **ALPHA15** device.
 
+### Environment Setup
 
+Running the Koheron SDK reliably requires a **native Ubuntu installation**. In my experience, virtual machines and Docker often result in version issues or broken builds.
+
+Use **Ubuntu 17.04 (2017.2)** for best results.
+
+After installing Ubuntu and cloning this repository, install the required dependencies:
+
+```bash
+make setup
+```
+
+### Device Setup
+
+- Power on your Koheron device.
+- Connect the device via Ethernet.
+- Connect your host computer to Wi-Fi or Ethernet. 
+- Determine the IP address of the Koheron device (this may vary by network).
+
+### Build and Run
+
+To build and deploy the instrument (change IP address as needed):
+
+```bash
+make CONFIG=alpha15-laser-control/config.yml HOST=192.168.1.115 run
+```
+
+Then launch the GUI:
+
+```bash
+python3 alpha15-laser-control/pyqt-app.py
+```
